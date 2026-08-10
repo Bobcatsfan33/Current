@@ -81,15 +81,19 @@ pub enum StateBound {
     /// The join declares `["left", "right"]` with factor 1 — it keeps both sides' integrals indexed
     /// by key, so its state is O(|A| + |B|) with one entry per row.
     ///
-    /// **The factor has to be justified, not tuned.** It exists because an operator can legitimately
-    /// keep more than one entry per input row: an aggregate with four aggregate slots keeps a value
-    /// multiset per slot, so its state is up to `1 + 4` entries per row. Declaring that is honest;
-    /// raising it until the check passes is not, and a reader should be able to count the entries a
-    /// factor claims. A wrong *complexity* still fails the check whatever the constant — a
-    /// cross-product join outgrows any fixed factor as soon as either side has a few rows.
+    /// **Neither number may be tuned; both must be justified.** The `factor` exists because an
+    /// operator can legitimately keep more than one entry per input row: an aggregate with four
+    /// aggregate slots keeps a value multiset per slot, so its state is up to `1 + 4` entries per row.
+    /// The `constant` exists because an operator can legitimately keep a fixed amount regardless of
+    /// input: a grand total keeps one entry recording that it has emitted, and it keeps it even over an
+    /// empty input (S-33). A reader should be able to *count* the entries each number claims.
+    ///
+    /// A wrong *complexity* still fails the check whatever these are — a cross-product join outgrows
+    /// any fixed factor as soon as either side has a few rows.
     ProportionalToInputs {
         inputs: &'static [&'static str],
         factor: usize,
+        constant: usize,
     },
 
     /// Unbounded by nature. Must be admitted explicitly at query registration (I-9); aggregation
@@ -101,8 +105,16 @@ impl fmt::Display for StateBound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StateBound::Stateless => f.write_str("stateless"),
-            StateBound::ProportionalToInputs { inputs, factor } => {
-                write!(f, "{factor}x proportional to {}", inputs.join(" + "))
+            StateBound::ProportionalToInputs {
+                inputs,
+                factor,
+                constant,
+            } => {
+                write!(
+                    f,
+                    "{constant} + {factor}x proportional to {}",
+                    inputs.join(" + ")
+                )
             }
             StateBound::Unbounded { reason } => write!(f, "unbounded ({reason})"),
         }

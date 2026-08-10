@@ -397,6 +397,14 @@ impl Oracle {
         // values implements "not distinct from" exactly, and orders the groups deterministically
         // while it is at it (I-2).
         let mut groups: BTreeMap<Vec<Value>, Vec<(Row, i64)>> = BTreeMap::new();
+
+        // The grand total is one group that exists whether or not any row does (S-33, D-20). Seeding
+        // it here — with no members — is the whole implementation: every rule below then applies to it
+        // unchanged, and S-30's "empty P" cases give COUNT 0 and the rest NULL.
+        if group_by.keys.is_empty() {
+            groups.insert(Vec::new(), Vec::new());
+        }
+
         for (row, weight) in &input.entries {
             if *weight < 0 {
                 return Err(OracleError::NegativeIntermediate {
@@ -425,15 +433,16 @@ impl Oracle {
 
         let mut entries = Vec::with_capacity(groups.len());
         for (key, members) in groups {
-            // A group exists iff its total weight is positive; a drained group vanishes rather
-            // than emitting a row of zeroes (S-29).
+            // A *keyed* group exists iff its total weight is positive; a drained one vanishes
+            // rather than emitting a row of zeroes (S-29). A grand total has no key, so nothing for
+            // its existence to depend on: it is always present (S-33, D-20).
             let mut total: i64 = 0;
             for (_, weight) in &members {
                 total = total.checked_add(*weight).ok_or(OracleError::Plan(
                     current_plan::PlanError::AggregateOverflow { func: "GROUP BY" },
                 ))?;
             }
-            if total <= 0 {
+            if total <= 0 && !group_by.keys.is_empty() {
                 continue;
             }
 

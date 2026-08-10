@@ -66,6 +66,7 @@ impl Operator for Distinct {
         StateBound::ProportionalToInputs {
             inputs: DISTINCT_INPUTS,
             factor: 1,
+            constant: 0,
         }
     }
 

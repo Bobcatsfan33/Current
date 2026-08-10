@@ -180,7 +180,9 @@ fn check_aliases_unique(source: &Source) -> Result<()> {
 }
 
 fn bind_group_by(group_by: &GroupBy, input: Scope<'_>) -> Result<Schema> {
-    if group_by.keys.is_empty() {
+    // Zero keys is the grand total, and it is legal: one group, always present (S-33, D-20). It used
+    // to be refused as `EmptyGroupKeys` while the question was open.
+    if group_by.aggregates.is_empty() {
         return Err(PlanError::EmptyGroupKeys);
     }
     let mut fields = Vec::with_capacity(group_by.keys.len() + group_by.aggregates.len());

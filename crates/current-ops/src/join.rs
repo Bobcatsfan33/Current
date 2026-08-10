@@ -213,6 +213,7 @@ impl Operator for Join {
             inputs: JOIN_INPUTS,
             // One index entry per row on each side, and nothing else.
             factor: 1,
+            constant: 0,
         }
     }
 

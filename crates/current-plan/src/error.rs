@@ -80,7 +80,10 @@ pub enum PlanError {
     #[error("CASE has no WHEN branches")]
     EmptyCase,
 
-    #[error("a GROUP BY with no keys is refused; grand-total aggregation is undecided (S-33)")]
+    #[error(
+        "a GROUP BY declares neither keys nor aggregates, so it computes nothing; a grand total \
+         needs at least one aggregate (S-33)"
+    )]
     EmptyGroupKeys,
 
     #[error("a join with no key pairs is a cross join, which is not supported at rung 2 (S-26)")]

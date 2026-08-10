@@ -586,17 +586,80 @@ fn s32_having_that_is_null_rejects_the_group() {
     assert_eq!(answer(&oracle, &query), "(k: Int64, s: Int64)\n");
 }
 
+/// **S-33 (D-20): a grand total returns one row, even over an empty input.**
+///
+/// This replaces C0's `s33_a_group_by_with_no_keys_is_refused`, which asserted the refusal that stood
+/// while the question was open. The decision went the other way, so the test did too.
 #[test]
-fn s33_a_group_by_with_no_keys_is_refused() {
+fn s33_a_grand_total_returns_one_row_even_over_an_empty_input() {
+    let empty = Oracle::new([("t".to_owned(), int_table(&["a", "b"]))]).unwrap();
+    let query = Query::from(Source::scan("t", "t")).group_by(GroupBy {
+        keys: vec![],
+        aggregates: vec![
+            Named::new("n", AggFunc::CountStar),
+            Named::new("c", AggFunc::Count(Expr::column("t.b"))),
+            Named::new("s", AggFunc::Sum(Expr::column("t.b"))),
+            Named::new("lo", AggFunc::Min(Expr::column("t.b"))),
+            Named::new("a", AggFunc::Avg(Expr::column("t.b"))),
+        ],
+        having: None,
+    });
+
+    // Epoch 0: nothing has ever been inserted, and the answer is still one row.
+    assert_eq!(
+        empty
+            .answer_at(&query, 0)
+            .unwrap()
+            .canonical()
+            .unwrap()
+            .render(),
+        "(n: Int64, c: Int64, s: Int64, lo: Int64, a: Float64)\n(0, 0, NULL, NULL, NULL) => 1\n",
+        "COUNT is 0 and the rest are NULL — S-30's empty-P rules over an empty group"
+    );
+
+    // And with data, it aggregates the lot.
+    let with_data = oracle_with(vec![(row(vec![i(1), i(4)]), 2), (row(vec![i(2), i(6)]), 1)]);
+    assert_eq!(
+        answer(&with_data, &query),
+        "(n: Int64, c: Int64, s: Int64, lo: Int64, a: Float64)\n(3, 3, 14, 4, 4.666666666666667) => 1\n",
+        "one group over everything: 3 rows by weight, sum 2x4 + 6 = 14"
+    );
+}
+
+/// A GROUP BY that computes nothing is still refused — the remaining `EmptyGroupKeys` case.
+#[test]
+fn s33_a_group_by_with_neither_keys_nor_aggregates_is_refused() {
     let oracle = oracle_with(vec![]);
     let query = Query::from(Source::scan("t", "t")).group_by(GroupBy {
         keys: vec![],
-        aggregates: vec![Named::new("n", AggFunc::CountStar)],
+        aggregates: vec![],
         having: None,
     });
     assert_eq!(
         plan_error(oracle.answer(&query).unwrap_err()),
         PlanError::EmptyGroupKeys
+    );
+}
+
+/// `HAVING` over a grand total composes without a special case: `COUNT(*) > 0` is false over an
+/// empty input, so the row is filtered out and the answer *is* empty (S-32, S-17, S-33).
+#[test]
+fn s33_having_can_filter_a_grand_total_away() {
+    let empty = Oracle::new([("t".to_owned(), int_table(&["a", "b"]))]).unwrap();
+    let query = Query::from(Source::scan("t", "t")).group_by(GroupBy {
+        keys: vec![],
+        aggregates: vec![Named::new("n", AggFunc::CountStar)],
+        having: Some(Expr::binary(BinOp::Gt, Expr::column("n"), Expr::int(0))),
+    });
+    assert_eq!(
+        empty
+            .answer_at(&query, 0)
+            .unwrap()
+            .canonical()
+            .unwrap()
+            .render(),
+        "(n: Int64)\n",
+        "the group exists, and HAVING rejects it"
     );
 }
 

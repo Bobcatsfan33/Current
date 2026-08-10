@@ -201,7 +201,7 @@ impl CircuitBuilder {
         }
         let schema = node_schema(&self.nodes, sink)?.clone();
         let node_count = self.nodes.len();
-        Ok(Circuit {
+        let mut circuit = Circuit {
             nodes: self.nodes,
             sources: self.sources,
             sink,
@@ -209,7 +209,9 @@ impl CircuitBuilder {
             result: ResultStore::new(schema),
             emitted_entries: vec![0; node_count],
             error_store: ResultStore::new(error_schema()?),
-        })
+        };
+        circuit.prime()?;
+        Ok(circuit)
     }
 }
 
@@ -264,6 +266,22 @@ impl Circuit {
         self.sources.keys().map(String::as_str)
     }
 
+    /// Give the circuit its defined initial state, without advancing the epoch (S-33, D-20).
+    ///
+    /// Every answer in Current is accumulated from deltas and therefore starts empty — except one. A
+    /// grand total has one group that exists whether or not any row does, so its row must be in the
+    /// answer *before* any epoch is sealed. Priming runs the operator chain once with empty inputs,
+    /// which is exactly the path a real epoch takes, and folds whatever falls out into the result
+    /// store. The epoch counter does not move: nothing has been sealed.
+    ///
+    /// For every other circuit this is a no-op — empty inputs produce empty outputs — and the cost is
+    /// one pass over a DAG at construction time.
+    fn prime(&mut self) -> Result<()> {
+        let empty = EpochDeltas::new();
+        self.run(&empty)?;
+        Ok(())
+    }
+
     /// Seal one epoch: push its deltas through the circuit and fold the sink's output delta into
     /// the result store (S-6, I-3).
     ///
@@ -272,6 +290,19 @@ impl Circuit {
     /// for a table that exists nowhere is a different matter and is caught when the source is
     /// built, not here.
     pub fn step(&mut self, deltas: &EpochDeltas) -> Result<Epoch> {
+        self.run(deltas)?;
+
+        // The epoch advances only now, after everything above succeeded. A step that fails leaves
+        // the circuit on the previous epoch rather than half-way into a new one (I-3).
+        self.epoch += 1;
+        Ok(self.epoch)
+    }
+
+    /// One pass of the DAG: the shared body of [`Circuit::step`] and [`Circuit::prime`].
+    ///
+    /// Priming is deliberately the *same* code as stepping. A separate initialisation path would be a
+    /// second place for the answer to be computed, and the two could disagree.
+    fn run(&mut self, deltas: &EpochDeltas) -> Result<()> {
         let mut outputs: Vec<Option<ZSetBatch>> = Vec::with_capacity(self.nodes.len());
         let mut errors: Vec<ZSetBatch> = Vec::new();
 
@@ -329,11 +360,7 @@ impl Circuit {
         for delta in &errors {
             self.error_store.absorb(delta)?;
         }
-
-        // The epoch advances only now, after everything above succeeded. A step that fails leaves
-        // the circuit on the previous epoch rather than half-way into a new one (I-3).
-        self.epoch += 1;
-        Ok(self.epoch)
+        Ok(())
     }
 
     /// Account every operator's actual state against its declaration (I-9).
@@ -343,7 +370,7 @@ impl Circuit {
     /// > operator exceeding its declaration is a bug, not a tuning problem.
     ///
     /// **The budget.** For `ProportionalToInputs`, the bound is the number of entries ever handed
-    /// to the operator on those inputs, times the factor the operator declared. That is a sound
+    /// to the operator on those inputs, times the declared factor, plus the declared constant. That is a sound
     /// upper bound on "O(|A| + |B|)" as an operator can actually satisfy it: an index over a side's
     /// integral holds one entry per *distinct* row, and distinct rows can never outnumber the
     /// entries that delivered them. The factor covers operators that keep several entries per row
@@ -373,7 +400,9 @@ impl Circuit {
     ) -> Result<usize> {
         match declared {
             StateBound::Stateless => Ok(0),
-            StateBound::ProportionalToInputs { factor, .. } => {
+            StateBound::ProportionalToInputs {
+                factor, constant, ..
+            } => {
                 let mut total = 0usize;
                 for input in inputs {
                     let emitted = self
@@ -383,7 +412,7 @@ impl Circuit {
                         .ok_or(CircuitError::UnknownNode(input.0))?;
                     total = total.saturating_add(emitted);
                 }
-                Ok(total.saturating_mul(factor))
+                Ok(total.saturating_mul(factor).saturating_add(constant))
             }
             // Refused at wiring time (`CircuitBuilder::add`), so a circuit holding one cannot be
             // built. Reported rather than silently allowed, in case that ever changes.

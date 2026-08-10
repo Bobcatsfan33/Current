@@ -57,6 +57,13 @@ pub const AGGREGATE_INPUTS: &[&str] = &["input"];
 const TAG_TOTAL: &str = "*";
 /// Key tag for a slot's ordered value multiset.
 const TAG_VALUES: &str = "v";
+/// Key tag recording that the grand total has emitted its row at least once (S-33).
+///
+/// Needed because a grand total's group exists from the start, so "what did it emit before this step"
+/// cannot be derived from the group's weight the way a keyed group's can. It is one entry, it lives in
+/// the backend like every other piece of operator state, and it is therefore checkpointed and restored
+/// by C4's machinery without any special handling.
+const TAG_PRIMED: &str = "primed";
 
 /// What a group emits: one row, nothing, or an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +96,8 @@ impl Aggregate {
         aggregates: Vec<Named<AggFunc>>,
         state: Box<dyn StateBackend>,
     ) -> Result<Aggregate> {
-        if keys.is_empty() {
+        // Zero keys is the grand total (S-33, D-20); zero aggregates computes nothing.
+        if aggregates.is_empty() {
             return Err(OpError::Plan(PlanError::EmptyGroupKeys));
         }
         Ok(Aggregate {
@@ -137,12 +145,32 @@ impl Aggregate {
         Ok(out)
     }
 
+    #[must_use]
+    fn is_grand_total(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    fn primed_key(&self) -> Key {
+        vec![Value::Str(TAG_PRIMED.to_owned())]
+    }
+
     /// What a group emits, given the state as it stands now.
-    fn emission(&self, group: &[Value]) -> Result<Emission> {
+    ///
+    /// `already_emitted` distinguishes the two questions this answers. For a keyed group they are the
+    /// same question — a group that has emitted is a group with positive weight — but a grand total
+    /// exists from the start, so "does it exist" and "has it emitted yet" come apart, and only the
+    /// second can tell `step` whether to retract a previous row.
+    fn emission(&self, group: &[Value], already_emitted: bool) -> Result<Emission> {
         let total = self.state.get(&self.total_key(group))?.unwrap_or(0);
-        // A group exists iff its total weight is positive; a drained group vanishes rather than
-        // emitting a row of zeroes (S-29).
-        if total <= 0 {
+        if self.is_grand_total() {
+            // A grand total has no key, so nothing for its existence to depend on: it is always
+            // present (S-33). Before it has ever emitted there is nothing to retract.
+            if !already_emitted {
+                return Ok(Emission::Absent);
+            }
+        } else if total <= 0 {
+            // A *keyed* group exists iff its total weight is positive; a drained one vanishes rather
+            // than emitting a row of zeroes (S-29).
             return Ok(Emission::Absent);
         }
 
@@ -259,15 +287,19 @@ impl Operator for Aggregate {
         &self.output_schema
     }
 
-    /// One entry per group for the total, plus one per (slot, group, distinct value).
+    /// One entry per group for the total, plus one per (slot, group, distinct value), plus — for a
+    /// grand total — one entry recording that it has emitted.
     ///
     /// The factor is `1 + aggregates` because that is the most entries one input row can create: it
-    /// belongs to one group, and contributes at most one value to each slot's multiset. It is a count
-    /// of entries, not a tuning knob (I-9).
+    /// belongs to one group, and contributes at most one value to each slot's multiset. The constant is
+    /// 1 for a grand total and 0 otherwise, because a grand total's `primed` marker exists even over an
+    /// empty input (S-33) — state that is genuinely not proportional to anything. Both are counts of
+    /// entries, not tuning knobs (I-9).
     fn state_bound(&self) -> StateBound {
         StateBound::ProportionalToInputs {
             inputs: AGGREGATE_INPUTS,
             factor: 1 + self.aggregates.len(),
+            constant: usize::from(self.is_grand_total()),
         }
     }
 
@@ -333,13 +365,20 @@ impl Operator for Aggregate {
             }
         }
 
-        // Every group this epoch touches, in a fixed order.
-        let touched: Vec<Vec<Value>> = total_delta.keys().cloned().collect();
+        // Every group this epoch touches, in a fixed order. A grand total is always touched: it has
+        // to emit its row on the first step even when no data arrives at all, which is what gives a
+        // circuit a defined initial state (S-33, D-20).
+        let mut touched: Vec<Vec<Value>> = total_delta.keys().cloned().collect();
+        if self.is_grand_total() && !touched.iter().any(Vec::is_empty) {
+            touched.push(Vec::new());
+        }
+
+        let was_primed = self.state.get(&self.primed_key())?.is_some();
 
         // What each touched group emitted BEFORE the epoch.
         let mut before: Vec<Emission> = Vec::with_capacity(touched.len());
         for group in &touched {
-            before.push(self.emission(group)?);
+            before.push(self.emission(group, was_primed)?);
         }
 
         // Apply the epoch to the state, atomically.
@@ -350,12 +389,15 @@ impl Operator for Aggregate {
         for ((slot, group, value), delta) in &value_delta {
             batch.add(self.value_key(*slot, group, value), *delta);
         }
+        if self.is_grand_total() && !was_primed {
+            batch.add(self.primed_key(), 1);
+        }
         self.state.write(&batch)?;
 
         // What each touched group emits AFTER, and therefore what changed.
         let mut out: Vec<(Row, i64)> = Vec::new();
         for (group, was) in touched.iter().zip(before) {
-            let now = self.emission(group)?;
+            let now = self.emission(group, true)?;
             if was == now {
                 continue;
             }

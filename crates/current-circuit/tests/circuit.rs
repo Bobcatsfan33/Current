@@ -414,6 +414,7 @@ mod accounting {
         StateBound::ProportionalToInputs {
             inputs: &["only"],
             factor: 1,
+            constant: 0,
         }
     }
 
@@ -504,6 +505,7 @@ mod accounting {
         let bound = StateBound::ProportionalToInputs {
             inputs: &["left", "right"],
             factor: 1,
+            constant: 0,
         };
         let err = builder
             .add(Box::new(hoarder(bound, 1, 1)), vec![source])

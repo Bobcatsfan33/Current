@@ -337,6 +337,32 @@ modes get measured. Today's decision is which crate, and why.
 **provisional** until it exists — because the freeze's whole claim is that a second backend can slot in
 without an operator changing, and one implementation cannot demonstrate that.
 
+### D-20 · Grand-total aggregation returns one row, always — closing Q-3
+
+*Sprint: C5. Preserves: I-1. Recorded in `docs/SEMANTICS.md` S-33.*
+
+`SELECT COUNT(*) FROM t` with no `GROUP BY` returns exactly one row, including over an empty input:
+`COUNT` is `0` and the other four aggregates are `NULL`. It agrees with standard SQL.
+
+**The tension it resolves.** S-29 says a group exists iff its total weight is positive — the rule that
+makes a drained group *vanish* instead of emitting `(key, 0)`, and one of C3's two canonical mutations.
+A grand total appears to contradict it. It does not, and the reason is worth stating precisely: S-29 is
+about groups whose identity comes from the data. A key is a value some row supplied, so a group whose
+rows have all left has nothing to name it. **A grand total has no key**, so its existence depends on
+nothing. One group, always present.
+
+**Why not stay uniform with S-29.** Returning no rows for `SELECT COUNT(*) FROM empty_table` is
+defensible from the rule and was rejected. §8's "the dialect ladder is the dialect" licences leaving
+constructs *out*; it does not licence giving a construct every user knows an answer they would call a
+bug. And it cuts against the product's own claim: the answer to "how many rows" is `0`.
+
+**What it costs.** The engine now needs a **defined initial state** — a non-empty answer before any
+epoch is sealed. Every other answer starts empty and is accumulated from deltas, so this is genuinely
+new: a circuit's result store is *primed* at build time by running the operator chain once with empty
+inputs, without advancing the epoch. The aggregate records that it has emitted, so the priming pass
+happens exactly once and survives a checkpoint like any other state (C4). One extra state entry, and
+one extra step in circuit construction, in exchange for an answer that matches what the query means.
+
 ---
 
 ## Open questions
@@ -418,7 +444,7 @@ property to stay true. The behaviour that does exist is pinned by
 step leaves the epoch and the result store exactly where they were, so nothing is half-applied
 (I-3), whatever the eventual policy turns out to be.
 
-### Q-3 · Grand-total aggregation over an empty input
+### Q-3 · Grand-total aggregation over an empty input — **CLOSED in C5 by D-20**
 
 *Raised: C0 (S-33). Must be settled by: C5, before the binder accepts `SELECT COUNT(*) FROM t`.*
 

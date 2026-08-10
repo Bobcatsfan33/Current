@@ -361,7 +361,8 @@ fn the_join_declares_state_proportional_to_both_inputs() {
         join.state_bound(),
         StateBound::ProportionalToInputs {
             inputs: &["left", "right"],
-            factor: 1
+            factor: 1,
+            constant: 0
         }
     );
     assert_eq!(join.state_size(), 0, "an unfed join holds nothing");

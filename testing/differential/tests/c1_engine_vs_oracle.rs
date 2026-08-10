@@ -353,17 +353,26 @@ fn the_engine_builds_the_whole_dialect_and_the_binder_refuses_the_rest() {
         "a rung-3 GROUP BY must build now that C3 has landed"
     );
 
-    // What is still refused is refused by the binder, by name. A GROUP BY with no keys is the
-    // grand-total shape, which S-33 leaves undecided.
-    let no_keys = Query::from(Source::scan("l", "l")).group_by(GroupBy {
+    // A GROUP BY with no keys is the grand total, and D-20 made it legal: one group, always present.
+    let grand_total = Query::from(Source::scan("l", "l")).group_by(GroupBy {
         keys: vec![],
         aggregates: vec![Named::new("n", AggFunc::CountStar)],
         having: None,
     });
-    let error = CircuitEngine::build(&tables, &no_keys)
-        .expect_err("a GROUP BY with no keys must be refused (S-33)");
+    if let Err(e) = CircuitEngine::build(&tables, &grand_total) {
+        panic!("a grand total must build now that D-20 has settled S-33: {e}");
+    }
+
+    // What is still refused is refused by the binder, by name: a GROUP BY that computes nothing.
+    let nothing = Query::from(Source::scan("l", "l")).group_by(GroupBy {
+        keys: vec![],
+        aggregates: vec![],
+        having: None,
+    });
+    let error = CircuitEngine::build(&tables, &nothing)
+        .expect_err("a GROUP BY with neither keys nor aggregates must be refused");
     assert!(
-        error.contains("grand-total"),
+        error.contains("computes nothing"),
         "the refusal must name what it refused: {error}"
     );
 

@@ -521,17 +521,44 @@ applied to a query's output, and every stage from a table integral onward preser
 non-negativity — filter and projection carry weights through, a join multiplies non-negatives, and
 an aggregate emits weight 1 per group.
 
-### S-33 · Aggregation without GROUP BY is not in rungs 1–3
+### S-33 · Aggregation without GROUP BY is one group that always exists
 
-A query with aggregates and no group keys (`SELECT COUNT(*) FROM t` — the "grand total" shape) has
-a genuine edge case: over an empty input, SQL returns one row (`0`), whereas S-29 would produce no
-group and therefore no row. Both answers are defensible and the difference is exactly the kind of
-thing that must be *decided*, not stumbled into.
+A query with aggregates and **no group keys** — `SELECT COUNT(*) FROM t`, the *grand total* — has
+exactly one group, and **that group exists whether or not the input has any rows.** Over an empty
+input it returns one row: `COUNT(*)` is `0`, `COUNT(x)` is `0`, and `SUM`, `MIN`, `MAX` and `AVG` are
+all `NULL` (S-30's rules for an empty `P`, applied to an empty group).
 
-It is **not decided here**, because it is not needed here: rung 3 is "GROUP BY + the five
-aggregates + HAVING", and grand-total aggregation is a distinct shape. A group list with zero keys
-is refused (`EmptyGroupKeys`). This is recorded as an open decision in `docs/DECISIONS.md` and must
-be settled before the SQL binder can accept `SELECT COUNT(*) FROM t` in C5.
+This closes the question C0 left open (Q-3 in `docs/DECISIONS.md`, now **D-20**), and it agrees with
+standard SQL.
+
+**It is an exception to S-29, and the exception is exactly one sentence wide.** S-29 says a group
+exists iff its total weight is positive, so that a group drained to zero rows *vanishes* rather than
+emitting `(key, 0)`. That rule is about **keyed** groups: a key is a value that came from the data, so
+a group whose rows have all left has nothing left to name it. A grand total has no key. There is
+nothing data-dependent about its identity, so there is nothing for its existence to depend on — it is
+one group, and it is always there.
+
+Put the other way round: S-29 forbids conjuring a row for a key nobody supplied. A grand total's row
+has no key to conjure.
+
+**Why match SQL rather than stay uniform.** The alternative — a grand total that returns nothing over
+an empty input — is defensible from S-29 and was rejected. `SELECT COUNT(*) FROM t` returning *no
+rows* for an empty table would be read as a broken database by every person who ever ran it, and "the
+dialect is ours" (§8) is a licence to omit constructs, not to give a familiar one an unfamiliar
+answer. The pitch is *every answer, current*; the answer to "how many rows are there" over an empty
+table is `0`, not "there is no answer".
+
+**What it costs, stated.** The engine must have a **defined initial state**: an answer that is
+non-empty before any epoch is sealed. That is new — every other answer starts empty and is built up
+from deltas — and it means a circuit's result store is primed when the circuit is built rather than
+starting at nothing. That is a real change to the runtime, and it is the price of this decision.
+
+`HAVING` applies to the grand total like any other group: `HAVING COUNT(*) > 0` over an empty input
+evaluates `0 > 0`, which is false, so the row is filtered out and the answer *is* empty (S-32, S-17).
+That composition is not a special case — it falls out of the two rules — and it is the shape most
+likely to surprise, so it is written down.
+
+---
 
 ---
 
@@ -546,7 +573,6 @@ Refused by name, and the name is the point:
 | `LEFT`/`RIGHT`/`FULL JOIN` | `NotInDialect("OUTER JOIN")` | rung 5 |
 | cross join / no join keys | `CrossJoinNotSupported` | rung 5 evaluation |
 | subqueries | `NotInDialect("subquery")` | rung 5 where decorrelatable |
-| grand-total aggregation | `EmptyGroupKeys` | open decision, by C5 (S-33) |
 | window functions | `NotInDialect(...)` | post-v1, by evidence of need (§8) |
 | user-defined functions | `NotInDialect(...)` | post-v1 (§8) |
 | recursive / iterative queries | `NotInDialect(...)` | out of scope for v1 (D-3) |
@@ -568,7 +594,7 @@ S-22c the least message is reported · S-22d errors are deterministic ·
 S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-26 join multiplies
 weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
 groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·
-S-32 HAVING · S-33 grand-total aggregation is undecided · S-34 DISTINCT.
+S-32 HAVING · S-33 grand-total aggregation is one always-present group · S-34 DISTINCT.
 
 Three rules were added after the first draft, when writing the oracle exposed questions the draft
 had not answered. They are recorded in place rather than appended, and the additions are: null
