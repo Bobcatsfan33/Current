@@ -80,6 +80,14 @@ jobs:
       - name: Prove the sandbox really has no network
         run: |
           set -euo pipefail
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor, so `unshare -rn`
+          # fails on a stock runner. Lifting that one restriction is enough; the alternative —
+          # running the suite as root under `sudo unshare -n` — would test the suite under a
+          # different user than every other job.
+          if ! unshare -rn true 2>/dev/null; then
+            echo "unprivileged user namespaces are restricted; enabling them for this runner"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           if ! unshare -rn true; then
             echo "::error::unshare -rn is unavailable on this runner; this job cannot prove the" \
                  "absence of network and must not pass by default"
