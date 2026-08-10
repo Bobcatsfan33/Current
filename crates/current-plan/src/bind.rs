@@ -86,8 +86,11 @@ pub struct Bound {
 
 /// Bind a query against a catalog (S-12).
 pub fn bind(query: &Query, catalog: &Catalog) -> Result<Bound> {
-    let input_schema = bind_source(&query.source, catalog)?;
+    // Aliases first: `FROM t JOIN t ON ...` would otherwise fail inside `bind_source`, where the
+    // duplicate surfaces as two columns called `t.id` rather than as the one thing that is actually
+    // wrong. A refusal must name its construct (S-12), and the construct here is the alias.
     check_aliases_unique(&query.source)?;
+    let input_schema = bind_source(&query.source, catalog)?;
 
     let input_scope = Scope::new(&input_schema, Naming::Qualified);
     if let Some(predicate) = &query.filter {

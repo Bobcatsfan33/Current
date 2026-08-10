@@ -787,3 +787,197 @@ path that quietly stops being reached.
   since C1 only because the log did not exist.
 
 Per the sprint protocol in `CLAUDE.md`, **C5 does not begin in the session that finished C4.**
+
+---
+
+## C5 — the SQL frontend and the incrementalizer
+
+**Objective (§6):** the same-door moment — SQL in, circuits out.
+
+Everything on §6 C5's list is delivered: `current-sql` (parser gate, binder, incrementalizer, plan
+type, instantiator), the SQL fuzzer, the I-6 plan and counter gates, and both canonical mutations. Two
+things are worth reading before the tables: **Q-3 is closed** (D-20), and **the SQL door is narrower
+than the typed API** in one specific way that is counted rather than glossed.
+
+### Pre-work carried into this sprint
+
+- **D-19** amends D-5 to **redb**, with the RocksDB blockers as the trigger and fjall recorded as
+  considered and rejected. The implementation stays C8-entry work; **D-18's freeze is provisional**
+  until a second backend validates the trait.
+- **D-18 corrected, visibly.** `libclang` was never the blocker — `--no-default-features` had disabled
+  `bindgen-runtime`. Disk was. The wrong reason is quoted in D-18 above the correction rather than
+  deleted, for the same reason C1's seam claim was corrected in the open.
+- **A nightly `SyncPolicy::Full` crash job** (`.github/workflows/ci.yml`, `nightly-full-sync`, cron
+  `17 3 * * *`, 400 cycles at `Config::durable()`). It observes nothing an in-process crash cannot
+  observe with `fsync` deferred, and its own module docs say so; it exists so the `fsync` path cannot
+  rot. Deliberately absent from `ci`'s `needs`: a scheduled job must not gate a push.
+- **C4's kill -9 gap now forward-points to C9's gate**, which runs exactly that test under load.
+
+### Part 1 — Q-3, closed by D-20
+
+`SELECT COUNT(*) FROM t` over an empty input returns **one row**, not zero. Doc first (S-33 rewritten),
+then the oracle, then the engine.
+
+The oracle side is three lines: seed the keyless group with no members, and exempt it from S-29's
+"a drained group vanishes" guard. The engine side is the interesting half, because a grand total is an
+answer that must exist **before any epoch is sealed**, and every other answer starts empty. So
+`CircuitBuilder::build` now *primes* the circuit by running an empty epoch through the same `run()`
+path a real step takes — no second code path — and emission is made idempotent by a `primed` marker in
+state. That marker costs one state entry, which is declared through a new **`constant` term** on
+`StateBound::ProportionalToInputs`; I-9's vocabulary had no way to say "O(1) state" before, and adding
+one number to the accounting is cheaper than exempting an operator from the accounting.
+
+| Claim | Test |
+| --- | --- |
+| A grand total returns one row over an empty input, on the **oracle** side | `s33_a_grand_total_returns_one_row_even_over_an_empty_input` |
+| The same, on the **engine** side, at epoch 0, through SQL text | `s33_the_grand_total_answers_before_any_epoch_is_sealed` |
+| `HAVING COUNT(*) > 0` filters the grand total away, with no special case | `s33_having_can_filter_a_grand_total_away` |
+| A GROUP BY that computes nothing is still refused | `s33_a_group_by_with_neither_keys_nor_aggregates_is_refused` |
+
+### Part 2 — binder semantics, doc first
+
+Three rules that C0 deferred to "the binder in C5" now say what they mean, and two new rules were
+needed to say it: **S-35** (the SQL door translates and can only shrink) and **S-36** (a projection is
+emitted only when the select list is not already the answer).
+
+| Rule | Decision | Why |
+| --- | --- | --- |
+| **S-11** name derivation | `AS n`, or a bare column reference's own name. Nothing else. | Every derived name is a name nobody chose, and the schema is part of the answer (S-8) |
+| **S-11** `SELECT *` | refused (`SelectStarNotSupported`) | The one refusal that exists *because* queries are standing: adding a column to a table must not change a running query's schema |
+| **S-11** identifiers | verbatim, case-sensitive, quoted or not; keywords and function names fold | Dialects disagree about which way to fold, and folding in one door only would make the doors disagree about what a column is called |
+| **S-19** untyped `NULL` | refused; write `CAST(NULL AS <type>)`, the only accepted cast | Inference would be a second analysis of the query, living in one door, that must agree with S-19's table |
+| **S-32** `AggregateInHaving` | a real refusal now, with `AggregateInWhere`, `NestedAggregate` and `AggregateNotTopLevel` beside it | SQL text can write what the typed API cannot represent; each place gets its own name |
+
+### Part 3 — `current-sql`, and where the documentation went
+
+`crates/current-sql/src/incremental.rs` is the best-documented file in the repository, as §5.6 requires:
+the three DBSP rules (linear, bilinear, stateful) each stated with the algebra, the reason it holds for
+the operators it covers, and the trap it sets. Every plan node carries its rule as **data**
+(`CircuitNode::rule`), so "this operator is linear" is a claim a test checks rather than a comment.
+
+The pipeline is split at a seam that pays for itself three times: **incrementalize** (pure, hashable,
+no state) then **instantiate** (allocates operators and one backend each). I-6 compares plans rather
+than circuits; C6's memo will hash subtrees; and a failed comparison prints two s-expression trees
+instead of two 64-bit numbers.
+
+Two honest notes about that file:
+
+- It performs **no general `δ`/`∫` rewrite**. Each logical operator has exactly one incremental
+  implementation, already in `current-ops`, so the incrementalizer chooses it and records why. The
+  file says this out loud, and says when a general rewriter would earn its keep (an open operator set,
+  several forms per operator, nested time domains — none of which v1 has).
+- It performs **no optimisation**. No pushdown, no reordering, no CSE. An optimiser today would change
+  what I-6 compares and what the harness covers, for a benefit nobody has measured (I-10).
+
+The old ad-hoc wiring in `testing/differential/src/circuit_engine.rs` is **deleted**: the typed door now
+calls `incrementalize_typed`, the SQL door calls `compile`, and both end in `instantiate`. There is one
+path from a query to a circuit, which is the only way I-6 can mean anything.
+
+### The exit gate
+
+| Gate condition (§6 C5) | Proven by | Result |
+| --- | --- | --- |
+| SQL fuzzer: hundreds of shapes, thousands of runs, green engine-vs-oracle | `the_sql_door_agrees_with_the_oracle_over_the_whole_renderable_population` | **2,028 scenarios**, 9,516 epochs, **11,544 answer comparisons**; all four families; every operation kind including retractions; 249 empty-input scenarios, 1,270 with an empty epoch, 122 error answers |
+| I-6: both doors produce structurally identical plans (hash equality) | `i6_the_two_doors_compile_to_structurally_identical_plans` | **2,028 plan pairs**, compared as s-expressions *and* by FNV-1a hash *and* by answer schema |
+| I-6: identical counters | `i6_the_two_doors_execute_identical_counters` | **470 scenarios** stepped through both doors, per-node counters compared after **every** epoch, 10,022 entries emitted |
+| Every refusal names its construct | `every_construct_outside_the_dialect_is_refused_by_name` | **60 constructs**, each refused by a message containing its name; `the_dialect_itself_is_accepted` proves the refusals are not "everything" |
+| Scalar expression library shared, tested differentially anyway | `current-plan` (D-14) + the fuzzer | unchanged from C3; the SQL door reaches the same `eval` |
+
+**315 tests across the workspace**, zero ignored except the scheduled nightly, zero skipped, zero
+flaky. The C5 gate runs in under a second.
+
+### The population, and the part of it that has no SQL form
+
+The fuzzer drives the SQL door by rendering the *existing* typed population back to SQL. That choice is
+what makes I-6 checkable over thousands of shapes — there is a typed query to compare each SQL plan
+against — and it puts the renderer under the I-6 assertion, so a renderer that writes SQL meaning
+something else fails the gate with both trees printed.
+
+Not every typed query has a SQL form, and the census is printed rather than implied:
+
+| Reason | Count (of 4,400 seeds) |
+| --- | --- |
+| **renderable** | **2,028** |
+| no projection and no GROUP BY — would need `SELECT *` | 1,110 |
+| a projection over a GROUP BY | 1,099 |
+| two group keys with one expression | 163 |
+
+`every_scenario_either_has_a_sql_form_or_a_named_reason` asserts that the four numbers account for
+every seed, and that the two large reasons still occur — so a change that made one unreachable is
+noticed rather than celebrated as improved coverage.
+
+**The middle row is a real difference in reach.** In SQL a group key's output name comes from the select
+list (S-11), so a query that both groups *and* projects would need to name its keys twice and has one
+select list to do it in. The typed API can express it; the SQL door cannot. That is recorded here, in
+`NoSqlForm::ProjectionOverGroupBy`'s own documentation, and in S-33's note about `ColumnNotGrouped`.
+
+### The gate's teeth
+
+Both mutations applied with a marker **grepped before the run**, and reverted; `grep -rn MUTANT` over
+`crates/` and `testing/` returns nothing.
+
+| Mutation | Caught by |
+| --- | --- |
+| **(a) binder invents a name** — `SELECT t.n + 1` accepted, named by its own SQL text | `s11_names_come_from_as_or_from_a_bare_column_reference` **and** `every_construct_outside_the_dialect_is_refused_by_name` (two independent tests) |
+| **(b) mis-incrementalized pipeline** — `DISTINCT` applied *before* the projection instead of last (S-34) | C1's gate at seed 0 epoch 4, **and** the C5 SQL-door gate at seed 0 epoch 4 |
+
+Mutation (b) is the interesting one: it still type-checks, still emits the right output schema, and so
+passes both wiring checks — the plan and the circuit both agree with the binder about the answer's
+schema. Only the *answers* change. Nothing but a differential comparison against a recompute-from-
+scratch oracle would have caught it, which is the argument for I-1 in one line.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| Names come from `AS`, or from a bare column reference, or not at all (S-11) | `s11_names_come_from_as_or_from_a_bare_column_reference` |
+| `SELECT *` is refused, with the standing-query reason in the message (S-11) | `s11_select_star_is_refused_because_a_standing_query_fixes_its_schema` |
+| Identifiers are verbatim: `A` and `a` are two columns; quoting changes only legality (S-11) | `s11_identifiers_are_verbatim` |
+| A null is written `CAST(NULL AS T)`, and that is the only cast (S-19) | `s19_a_null_is_written_with_its_type`, `a_cast_that_converts_is_refused` |
+| A negative literal is a literal, including `i64::MIN` (S-19) | `negative_integer_literals_fold_into_the_literal` |
+| A grouped query emits no projection when the select list is already the group output (S-36) | `s27_a_group_by_binds_to_keys_then_aggregates_with_no_projection` |
+| Reordering or narrowing the select list emits one (S-36) | `s36_reordering_the_select_list_emits_a_projection`, `s27_a_key_absent_from_the_select_list_still_gets_a_name` |
+| Two aliases for one key both read the key (S-36) | `s36_two_aliases_for_one_key_read_the_same_column` |
+| An aggregate with no `GROUP BY` is the grand total (S-33) | `s33_an_aggregate_with_no_group_by_is_the_grand_total` |
+| A column outside the grouping belongs to no group, and the workaround binds (S-33) | `s33_a_column_outside_the_grouping_is_refused` |
+| Each misplaced aggregate has its own refusal (S-32) | `s32_each_misplaced_aggregate_has_its_own_refusal` |
+| The plan has one node per stage, in pipeline order, with the right DBSP rule on each (§5.6) | `the_plan_has_one_node_per_stage_in_pipeline_order` |
+| Naming switches at the GROUP BY: `WHERE` sees `t.n`, `HAVING` sees `n` (S-10, S-27) | `naming_switches_at_the_group_by` |
+| Every clause of the sqlparser AST outside the dialect is refused by name | `every_clause_outside_the_dialect_is_refused_by_name`, `every_construct_outside_the_dialect_is_refused_by_name` |
+| A plan's structural form and hash distinguish plans that differ anywhere | `the_structural_form_distinguishes_plans_that_differ`, `a_column_and_a_string_literal_render_differently` |
+
+### What C5 does **not** prove
+
+- **The differential SQL sweep is not an independent check of the answers.** Because the two doors
+  compile to *identical* plans — which is exactly what I-6 asserts — a green SQL sweep follows from a
+  green typed sweep. Its value is that compile-and-build succeeds across the population and that the
+  identity holds at runtime, not that the answers were checked twice. The independent content is I-6
+  itself, plus the hand-written binder tests, where SQL text sits on one side and the plan the rule
+  says it means sits on the other.
+- **The fuzzer's SQL is written by the same author as the binder.** `sql_render` is a renderer, not an
+  independent SQL generator; a shared misconception about SQL would render and bind consistently and
+  the gate would stay green. What guards against that is `crates/current-sql/tests/dialect.rs` — 60
+  hand-written constructs — and `binder.rs`'s hand-written plans, not the fuzzer.
+- **No grand total, and no `HAVING`, is reached by the fuzzer.** The generator always makes at least
+  one group key and sets `having` only through the typed path; both shapes are covered by hand-written
+  tests instead, including the I-6 pairs.
+- **No `Float64` flows through the SQL door except from `AVG`.** There is no way to write a float
+  literal (S-3), which is the point, but it means the SQL door's float handling is exactly AVG's.
+- **No performance claim, again.** The parser, binder and incrementalizer are not benchmarked, and the
+  engine-constant ledger is still empty. C8 owns that.
+- **No memo, no sharing.** Two identical standing queries build two circuits. `CircuitPlan::nodes` and
+  the structural hash exist for C6 to use; C6 has not happened.
+
+### What C6 needs
+
+- **The structural hash is ready**, and it is stable by construction: FNV-1a over a rendering, not
+  `std::hash::Hash`, whose output is explicitly not stable across releases. A memo that shares
+  sub-circuits needs subtree hashes, and `CircuitNode::structural_hash` is one call per node.
+- **Counters are public** (`Circuit::counters`), which is what I-8's counter gate will assert on, and
+  what I-6 already does.
+- **The incrementalizer is the place sharing will attach**, and it now has one caller for both doors,
+  so a memo lookup inserted there is inserted once.
+- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4's list and
+  still true.
+
+Per the sprint protocol in `CLAUDE.md`, **C6 does not begin in the session that finished C5.**

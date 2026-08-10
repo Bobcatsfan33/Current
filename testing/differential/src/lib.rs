@@ -25,6 +25,9 @@
 //! - [`engine`] — [`EngineUnderTest`], the seam C1 attaches to.
 //! - [`oracle_engine`] — the oracle as an implementation, plus the saboteur.
 //! - [`harness`] — the comparison itself.
+//! - [`sql_render`] — a typed query rendered back to SQL, so the fuzzer can drive the SQL door with
+//!   the population the generator already produces (C5).
+//! - [`sql_engine`] — the SQL door as an implementation: text in, circuit out.
 //!
 //! ## Reproducing a failure
 //!
@@ -50,6 +53,8 @@ pub mod harness;
 pub mod oracle_engine;
 pub mod rng;
 pub mod scenario;
+pub mod sql_engine;
+pub mod sql_render;
 
 pub use circuit_engine::CircuitEngine;
 pub use engine::EngineUnderTest;
@@ -59,3 +64,5 @@ pub use harness::{
 pub use oracle_engine::{OracleEngine, SaboteurEngine};
 pub use rng::Rng;
 pub use scenario::{Family, Operation, Scenario};
+pub use sql_engine::SqlEngine;
+pub use sql_render::{sql_form, NoSqlForm};

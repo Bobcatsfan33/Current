@@ -163,10 +163,43 @@ keys and aggregates, referenced unqualified — grouping erases the input schema
 ### S-11 · Output names are explicit
 
 Every projection element, group key, and aggregate declares its output name explicitly. Current
-does not derive names from expressions at rungs 1–3. (SQL's name-derivation rules arrive with the
-binder in C5 and will be specified then; they are a *frontend* question, not a semantic one.)
+does not derive names from expressions.
 
 Duplicate output names in one schema are refused (`DuplicateOutputName`).
+
+**SQL name derivation (C5).** SQL text does not always declare a name, so the binder needs a rule.
+It is deliberately the shortest rule that can be stated:
+
+| SQL select element | Output name |
+| --- | --- |
+| `<expr> AS n` | `n`, verbatim |
+| `t.c` — a bare column reference | `c`, the column name without its qualifier |
+| `c` — after a GROUP BY, an output name | `c` |
+| anything else | refused: `MissingOutputName` |
+
+`SELECT a + 1 FROM t` is refused, not named `a + 1` or `?column?` or `expr_1`. Every dialect invents
+a different name there, none of them are names anyone wanted, and a *standing* computation's output
+schema is not the place for a name nobody chose: the schema is part of answer equality (S-8), so a
+derived name is a derived answer. Writing `AS` costs four characters.
+
+**`SELECT *` is refused** (`SelectStarNotSupported`). This is not laziness about expansion — it is
+the one refusal in this document that exists specifically because queries here are *standing*. A
+`SELECT *` fixes its schema from the catalog at bind time, so adding a column to a table would
+silently change the schema, and therefore the answer, of a query that is already running and whose
+consumers are already reading it. Star expansion is a convenience for queries that are typed, run,
+and thrown away. Nothing here is thrown away.
+
+**Identifiers are taken verbatim, and comparison is case-sensitive** — quoted and unquoted alike.
+`SELECT T.A FROM t AS T` resolves `T.A` against a column literally named `A`. Standard SQL folds
+unquoted identifiers to upper case, PostgreSQL folds to lower, and MySQL's behaviour depends on the
+filesystem; every one of those rules produces a name the user did not type. Since the typed API takes
+names verbatim, folding in the SQL door would mean the two doors disagree about what a column is
+called — and I-6 requires them to compile to the *same plan*. Verbatim is the only rule that makes
+that possible without the typed API growing a folding rule of its own.
+
+Keywords and **function names** do fold: `count(*)` and `COUNT(*)` are one function, and `select` is
+`SELECT`. The line is between naming something the user created and naming something the dialect
+defines — an identifier is data, a keyword is language, and SQL has always folded the second.
 
 **Every column of a query's output schema is declared nullable.** Schema equality is part of
 answer equality (S-8), so the oracle and the engine must agree on nullability exactly; a uniform
@@ -263,10 +296,20 @@ string-to-number parsing. `Float64` never appears as an operand or a result (S-3
 
 **Null literals carry a type.** A bare, untyped `NULL` literal is refused
 (`UntypedNullLiteral`); a null literal is written with its type, and binding then types every
-expression without inference. SQL's untyped `NULL` — which needs contextual inference, or an
-explicit `CAST` — is a *frontend* problem and is deferred to the binder in C5, where it belongs.
-Nothing at rungs 1–3 needs it, because the typed API that C0 exposes can simply say which kind of
-null it means.
+expression without inference.
+
+**In SQL text (C5), a null is written `CAST(NULL AS <type>)`, and that is the only accepted `CAST`.**
+The accepted type names are `BIGINT` (`Int64`), `TEXT` and `VARCHAR` (`Utf8`), and `BOOLEAN`; every
+other cast — including a cast of anything that is not `NULL`, and including `DOUBLE` — is refused
+(`UnsupportedCast`), because a cast that converts is exactly the implicit conversion this rule
+forbids, made explicit. `SELECT CAST(a AS TEXT)` is a refusal, not a conversion.
+
+The alternative was to infer a bare `NULL`'s type from its context, as SQL does. It was rejected on
+the same grounds as everything else in this document that could have been inferred: inference is a
+*second* analysis of the query, it lives only in the SQL door, and the oracle would then be typing
+expressions by one set of rules and the binder by another. Two analyses that must agree are a
+disagreement waiting to happen, and I-1 would report it as a correctness failure with no hint that
+the cause was a type nobody wrote down. `CAST(NULL AS BIGINT)` is more typing and less machinery.
 
 ### S-20 · Integer overflow is an error, not a wrap
 
@@ -483,11 +526,32 @@ declared names, and nothing else. It never re-opens the input rows, so there are
 inside `HAVING` beyond the ones already declared — an aggregate call in a `HAVING` expression is
 refused (`AggregateInHaving`); declare it as an output and reference it by name.
 
-*In C0 that refusal has no code, because the typed API cannot express it:* a `HAVING` is a scalar
-expression, and the scalar expression type has no aggregate variant, so the illegal query does not
-type-check in Rust. Unrepresentable is a stronger guarantee than refused. The named refusal
-becomes real work in C5, when SQL text — which certainly can write `HAVING COUNT(*) > 2` — reaches
-the binder.
+*Through the typed API that refusal has no code, because the API cannot express it:* a `HAVING` is a
+scalar expression, and the scalar expression type has no aggregate variant, so the illegal query does
+not type-check in Rust. Unrepresentable is a stronger guarantee than refused.
+
+**Through the SQL door (C5) it is a real refusal**, because SQL text can certainly write
+`HAVING COUNT(*) > 2`. So can it write an aggregate in two other places the typed API forbids by
+construction, and each gets its own name rather than one shared "aggregate not allowed here":
+
+| SQL | Refusal | Why |
+| --- | --- | --- |
+| `HAVING COUNT(*) > 2` | `AggregateInHaving` | declare it as an output and reference it by name |
+| `WHERE COUNT(*) > 2` | `AggregateInWhere` | `WHERE` runs *before* aggregation (S-9), so there is nothing to aggregate yet |
+| `SUM(COUNT(a))` | `NestedAggregate` | an aggregate consumes rows, and an aggregate is not a row |
+| `COUNT(*) + 1` | `AggregateNotTopLevel` | an aggregate must be the whole output column — see below |
+
+**An aggregate must be the whole output column.** `SELECT COUNT(*) + 1 AS n` is refused, for the same
+reason a derived name is (S-11): an expression *over* aggregates is a projection over the group output,
+and its inputs would need names nobody wrote. The workaround is to select the aggregate and do the
+arithmetic where the answer is read — which, for a maintained answer, is the honest place for it:
+`COUNT(*) + 1` changes on exactly the epochs `COUNT(*)` does, so maintaining it separately buys
+nothing.
+
+`HAVING COUNT(*) > 2` has an obvious rewrite — `SELECT ..., COUNT(*) AS n ... HAVING n > 2` — and the
+refusal message says so. The rewrite is deliberately left to the person writing the query: performing
+it in the binder would add an output column the query did not ask for, which would change the output
+schema, which is part of the answer (S-8).
 
 ### S-34 · `DISTINCT` keeps one copy of every row that is present
 
@@ -553,6 +617,18 @@ non-empty before any epoch is sealed. That is new — every other answer starts 
 from deltas — and it means a circuit's result store is primed when the circuit is built rather than
 starting at nothing. That is a real change to the runtime, and it is the price of this decision.
 
+**In SQL there is no GROUP BY clause to write.** `SELECT COUNT(*) AS n FROM t` names no keys at all,
+so the binder synthesises the keyless `GroupBy` when the select list contains an aggregate and the
+query has no `GROUP BY` clause. A select list that mixes an aggregate with anything that is not a
+grouping expression is refused (`ColumnNotGrouped`) — `SELECT t.a, COUNT(*) AS n FROM t` names no
+group for `a` to belong to, and SQL dialects that answer it anyway are picking a row arbitrarily.
+
+The refusal is by **whole expression**, not by functional dependence: `SELECT t.a + 1 AS o, COUNT(*) AS
+n FROM t GROUP BY t.a` is refused too, though standard SQL accepts it. Accepting it would mean
+substituting the key into the expression and then projecting over the group output — a rewrite pass
+whose only purpose is to let one query be written a second way. The workaround is to group by the
+expression the query actually wants: `GROUP BY t.a + 1` binds, and says what it means.
+
 `HAVING` applies to the grand total like any other group: `HAVING COUNT(*) > 0` over an empty input
 evaluates `0 > 0`, which is false, so the row is filtered out and the answer *is* empty (S-32, S-17).
 That composition is not a special case — it falls out of the two rules — and it is the shape most
@@ -560,9 +636,54 @@ likely to surprise, so it is written down.
 
 ---
 
+## 7. The SQL surface
+
+### S-35 · The SQL door translates; it never means anything the typed API cannot
+
+SQL text is a second *way of writing* a query, not a second dialect. Every accepted statement binds
+to the same `Query` the typed API builds, and I-6 makes that testable rather than aspirational: the
+same query written both ways compiles to structurally identical plans, checked by hash equality, and
+runs with identical operator counters.
+
+The consequence is worth stating plainly, because it is the opposite of how SQL frontends usually
+grow: **the SQL surface can only shrink, never extend.** No construct is accepted because sqlparser
+happens to parse it. If SQL can express something the typed API cannot, the answer is a named refusal
+here, or a change to the typed API and to this document first — never a special case in the parser.
+
+Everything in §8's table is refused through the SQL door too, by the same name. These refusals exist
+only in the SQL door, because only SQL text can write them:
+
+| Construct | Refusal |
+| --- | --- |
+| `SELECT *` | `SelectStarNotSupported` (S-11) |
+| a computed output column with no `AS` | `MissingOutputName` (S-11) |
+| a bare `NULL` | `UntypedNullLiteral` (S-19) |
+| any `CAST` other than `CAST(NULL AS <type>)` | `UnsupportedCast` (S-19) |
+| an aggregate in `HAVING` / `WHERE` / an aggregate | `AggregateInHaving` / `AggregateInWhere` / `NestedAggregate` (S-32) |
+| an expression over an aggregate | `AggregateNotTopLevel` (S-32) |
+| a select item that is neither grouped nor aggregated | `ColumnNotGrouped` (S-33) |
+| a function that is not one of the six aggregates | `UnknownFunction` |
+| everything else SQL has and this dialect does not | `NotInDialect(<construct>)` (§8) |
+
+A refusal that does not name its construct is a bug in the binder, not a stylistic matter (S-12).
+The gate asserts it: every refusal the SQL fuzzer provokes must name what it refused.
+
+### S-36 · Projection is emitted only when the select list is not already the answer
+
+A `GROUP BY` computes its keys and then its aggregates, in that order, under their declared names
+(S-27). When a SQL select list asks for exactly that — the same names, in the same order — the bound
+plan carries **no** projection, because a projection to the schema you already have is a node that
+does nothing. When the select list reorders or narrows, a projection is emitted.
+
+This is written down because it is the one place where the shape of the bound plan depends on the
+*text* rather than only on the meaning, and I-6 compares shapes. `SELECT a, n FROM ... GROUP BY a`
+and `SELECT n, a FROM ... GROUP BY a` are different queries with different answers — the column
+order is part of the schema, and the schema is part of the answer (S-8) — so they bind to different
+plans, and the second one's extra projection is not an artefact.
+
 ---
 
-## 7. What this document deliberately does not define
+## 8. What this document deliberately does not define
 
 Refused by name, and the name is the point:
 
@@ -581,7 +702,7 @@ Refused by name, and the name is the point:
 
 ---
 
-## 8. Index of rules
+## 9. Index of rules
 
 S-1 values · S-2 types and schemas · S-3 Float64 is result-only · S-4 rows, Z-sets, weights ·
 S-5 non-negative integrals · S-6 epochs · S-7 total order on values · S-8 canonical form and
@@ -594,7 +715,9 @@ S-22c the least message is reported · S-22d errors are deterministic ·
 S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-26 join multiplies
 weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
 groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·
-S-32 HAVING · S-33 grand-total aggregation is one always-present group · S-34 DISTINCT.
+S-32 HAVING · S-33 grand-total aggregation is one always-present group · S-34 DISTINCT ·
+S-35 the SQL door translates and can only shrink · S-36 projection is emitted only when the select
+list is not already the answer.
 
 Three rules were added after the first draft, when writing the oracle exposed questions the draft
 had not answered. They are recorded in place rather than appended, and the additions are: null

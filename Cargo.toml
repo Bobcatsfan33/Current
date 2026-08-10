@@ -8,6 +8,7 @@ members = [
     "crates/current-oracle",
     "crates/current-ops",
     "crates/current-circuit",
+    "crates/current-sql",
     "testing/differential",
     "testing/crash",
 ]
@@ -29,11 +30,15 @@ current-differential = { path = "testing/differential" }
 current-oracle = { path = "crates/current-oracle" }
 current-ops = { path = "crates/current-ops" }
 current-circuit = { path = "crates/current-circuit" }
+current-sql = { path = "crates/current-sql" }
 
 arrow-array = { version = "59", default-features = false }
 arrow-buffer = { version = "59", default-features = false }
 arrow-schema = { version = "59", default-features = false }
 thiserror = { version = "2", default-features = false, features = ["std"] }
+# The parser, and only the parser: sqlparser produces an AST, and the binder decides what any of
+# it means. A construct parsing is never a reason to support it (S-35).
+sqlparser = { version = "0.62", default-features = false, features = ["std"] }
 
 proptest = { version = "1", default-features = false, features = ["std"] }
 rand_core = { version = "0.10", default-features = false }

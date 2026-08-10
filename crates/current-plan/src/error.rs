@@ -89,12 +89,44 @@ pub enum PlanError {
     #[error("a join with no key pairs is a cross join, which is not supported at rung 2 (S-26)")]
     CrossJoinNotSupported,
 
-    // S-32's `AggregateInHaving` refusal has no variant here on purpose: the typed API cannot
-    // express an aggregate inside a HAVING, because `Expr` has no aggregate variant. The illegal
-    // query fails to type-check in Rust, which is stronger than refusing it at bind time. The
-    // refusal becomes real work in C5, when SQL text reaches the binder.
     #[error("aggregate {func} does not accept an argument of type {ty} (S-30)")]
     AggregateTypeUnsupported { func: &'static str, ty: DataType },
+
+    // ---- refusals only SQL text can provoke (S-32, S-33, S-35) -----------------------------
+    //
+    // These five are unreachable through the typed API, because `Expr` has no aggregate variant:
+    // the illegal query fails to type-check in Rust, which is a stronger guarantee than refusing
+    // it at bind time. They live here anyway, with every other named refusal, because they are
+    // statements about what a query *means* rather than about how its text was written — and
+    // because `docs/SEMANTICS.md` names them in the rules they belong to, not in a parser appendix.
+    #[error(
+        "{func} is an aggregate, and HAVING is evaluated after aggregation: declare it as an \
+         output column and reference it by name instead (S-32)"
+    )]
+    AggregateInHaving { func: String },
+
+    #[error(
+        "{func} is an aggregate, and WHERE is evaluated before aggregation, so there is nothing \
+         to aggregate yet (S-9, S-32)"
+    )]
+    AggregateInWhere { func: String },
+
+    #[error(
+        "{outer} is an aggregate and cannot take the aggregate {inner} as its argument (S-32)"
+    )]
+    NestedAggregate { outer: String, inner: String },
+
+    #[error(
+        "{func} is an aggregate, so it must be the whole output column: an expression *over* an \
+         aggregate is not in the v1 dialect (S-32)"
+    )]
+    AggregateNotTopLevel { func: String },
+
+    #[error(
+        "{name} is neither a grouping expression nor an aggregate, so it belongs to no group \
+         (S-27, S-33)"
+    )]
+    ColumnNotGrouped { name: String },
 
     // ---- evaluation errors (S-20, S-21, S-22) ---------------------------------------------
     #[error("arithmetic overflow in {op} (S-20)")]

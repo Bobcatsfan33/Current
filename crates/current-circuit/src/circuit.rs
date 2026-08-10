@@ -106,7 +106,8 @@ pub struct Circuit {
 /// Builds a circuit in dependency order.
 ///
 /// There is no SQL here and there is not meant to be: §6 C1 asks for "a hand-built (no SQL yet)
-/// circuit API". The incrementalizer that compiles a plan into this shape is C5's job.
+/// circuit API". The incrementalizer that compiles a plan into this shape is `current-sql`, added in
+/// C5; it calls exactly this builder, which is why there is one wiring path and not two.
 #[derive(Debug, Default)]
 pub struct CircuitBuilder {
     nodes: Vec<Node>,
@@ -520,6 +521,17 @@ impl Circuit {
     /// enough: two runs can agree on every answer while holding different state, and that
     /// difference becomes a wrong answer later — or, from C4, a recovery that does not match its
     /// uncrashed twin (I-7).
+    /// Entries each node has ever emitted, indexed by node — the **execution counters**.
+    ///
+    /// I-6 and I-8 are counter gates: two circuits that should be the same are compared not only by
+    /// their answers but by how much work each node did. Counters catch divergence *before* answers
+    /// diverge, which matters because a sharing bug or a mis-incrementalized operator can produce the
+    /// right answer by a wrong route for a long time before it produces a wrong one.
+    #[must_use]
+    pub fn counters(&self) -> &[usize] {
+        &self.emitted_entries
+    }
+
     pub fn state_fingerprint(&self) -> Result<String> {
         let mut out = format!("circuit @ epoch {}\n", self.epoch);
         for (index, node) in self.nodes.iter().enumerate() {
