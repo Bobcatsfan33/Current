@@ -9,7 +9,8 @@
 //! | [`Filter`] | linear | none | C1 |
 //! | [`Project`] | linear | none | C1 |
 //! | [`Join`] | bilinear | O(\|A\| + \|B\|) | C2 |
-//! | aggregate, distinct | stateful | per group | C3 |
+//! | [`Aggregate`] | stateful | per group, per aggregate slot | C3 |
+//! | [`Distinct`] | stateful | the input's integral | C3 |
 //!
 //! ## The rule that governs every operator in this crate
 //!
@@ -28,11 +29,15 @@
 //! [`StateBound::Stateless`] and both reports are zero — which is §6 C1's pitfall turned into an
 //! assertion instead of a warning.
 
+pub mod aggregate;
+pub mod distinct;
 pub mod error;
 pub mod join;
 pub mod linear;
 pub mod operator;
 
+pub use aggregate::Aggregate;
+pub use distinct::Distinct;
 pub use error::{OpError, Result};
 pub use join::Join;
 pub use linear::{Filter, Project};

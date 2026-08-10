@@ -165,9 +165,9 @@ impl CircuitBuilder {
         // A state declaration that does not describe the operator cannot be checked, so it is
         // rejected here rather than accepted and quietly ignored later (I-9).
         match op.state_bound() {
-            StateBound::ProportionalToInputs { inputs: declared }
-                if declared.len() != op.arity() =>
-            {
+            StateBound::ProportionalToInputs {
+                inputs: declared, ..
+            } if declared.len() != op.arity() => {
                 return Err(CircuitError::StateDeclarationArityMismatch {
                     op: op.name(),
                     declared: declared.len(),
@@ -343,9 +343,11 @@ impl Circuit {
     /// > operator exceeding its declaration is a bug, not a tuning problem.
     ///
     /// **The budget.** For `ProportionalToInputs`, the bound is the number of entries ever handed
-    /// to the operator on those inputs. That is a sound upper bound on "O(|A| + |B|)" as an
-    /// operator can actually satisfy it: an index over a side's integral holds one entry per
-    /// *distinct* row, and distinct rows can never outnumber the entries that delivered them.
+    /// to the operator on those inputs, times the factor the operator declared. That is a sound
+    /// upper bound on "O(|A| + |B|)" as an operator can actually satisfy it: an index over a side's
+    /// integral holds one entry per *distinct* row, and distinct rows can never outnumber the
+    /// entries that delivered them. The factor covers operators that keep several entries per row
+    /// for a stated reason — an aggregate keeps a value multiset per aggregate slot.
     ///
     /// **What it catches.** Anything whose state grows faster than its input. A join that stored
     /// the cross product would hold |A|·|B| entries against a budget of |A|+|B| and fail as soon as
@@ -357,6 +359,40 @@ impl Circuit {
     /// multiplicities mean entries outnumber distinct rows. Tightening that needs the real
     /// per-operator input integrals, which is `EXPLAIN STATE` in C8; the honest position here is
     /// that this catches the wrong *complexity*, not every wasted byte.
+    /// The entries an operator is allowed to hold, given its declaration and what it has been fed.
+    ///
+    /// One function, used by both the check and the state fingerprint, so the number a reader sees
+    /// is the number the runtime enforced. They were computed separately once, and the fingerprint
+    /// quietly reported a budget without the declared factor — a discrepancy that made the printed
+    /// accounting wrong while the check was right.
+    fn state_budget(
+        &self,
+        declared: StateBound,
+        inputs: &[NodeId],
+        op: &'static str,
+    ) -> Result<usize> {
+        match declared {
+            StateBound::Stateless => Ok(0),
+            StateBound::ProportionalToInputs { factor, .. } => {
+                let mut total = 0usize;
+                for input in inputs {
+                    let emitted = self
+                        .emitted_entries
+                        .get(input.0)
+                        .copied()
+                        .ok_or(CircuitError::UnknownNode(input.0))?;
+                    total = total.saturating_add(emitted);
+                }
+                Ok(total.saturating_mul(factor))
+            }
+            // Refused at wiring time (`CircuitBuilder::add`), so a circuit holding one cannot be
+            // built. Reported rather than silently allowed, in case that ever changes.
+            StateBound::Unbounded { reason } => {
+                Err(CircuitError::UnboundedStateNotAdmissible { op, reason })
+            }
+        }
+    }
+
     fn check_state_declarations(&self) -> Result<()> {
         for (index, node) in self.nodes.iter().enumerate() {
             let Node::Operator { op, inputs } = node else {
@@ -365,29 +401,7 @@ impl Circuit {
             let declared = op.state_bound();
             let actual = op.state_size();
 
-            let budget = match declared {
-                StateBound::Stateless => 0,
-                StateBound::ProportionalToInputs { .. } => {
-                    let mut total = 0usize;
-                    for input in inputs {
-                        let emitted = self
-                            .emitted_entries
-                            .get(input.0)
-                            .copied()
-                            .ok_or(CircuitError::UnknownNode(input.0))?;
-                        total = total.saturating_add(emitted);
-                    }
-                    total
-                }
-                // Refused at wiring time (`CircuitBuilder::add`), so a circuit holding one cannot
-                // be built. Reported rather than silently allowed, in case that ever changes.
-                StateBound::Unbounded { reason } => {
-                    return Err(CircuitError::UnboundedStateNotAdmissible {
-                        op: op.name(),
-                        reason,
-                    })
-                }
-            };
+            let budget = self.state_budget(declared, inputs, op.name())?;
 
             if actual > budget {
                 let _ = index;
@@ -425,10 +439,7 @@ impl Circuit {
                 Node::Operator { op, inputs } => {
                     let wiring: Vec<String> =
                         inputs.iter().map(|i| format!("node {}", i.0)).collect();
-                    let budget: usize = inputs
-                        .iter()
-                        .map(|i| self.emitted_entries.get(i.0).copied().unwrap_or(0))
-                        .sum();
+                    let budget = self.state_budget(op.state_bound(), inputs, op.name())?;
                     out.push_str(&format!(
                         "node {index} {} inputs=[{}] state_bound={} state_size={} budget={} emitted={} schema={}\n",
                         op.name(),

@@ -8,8 +8,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C0** — the oracle, the harness, and the rules | **complete; exit gate green in CI** |
 | **C1** — linear operators + the first real circuit | **complete; exit gate green in CI** |
 | **C2** — join | **complete; exit gate green in CI** |
-| C3 — aggregates and distinct | not started; opens by settling **Q-2** doc-first |
-| C4 … C13 | not started |
+| **C3** — aggregates and distinct | **complete; exit gate green in CI** |
+| C4 — durability | not started |
+| C5 … C13 | not started |
 
 ---
 
@@ -480,3 +481,179 @@ ledger's generator entries are regenerated because the population will have move
 - **Q-2 first, before any of it.**
 
 Per the sprint protocol in `CLAUDE.md`, **C3 does not begin in the session that finished C2.**
+
+---
+
+## C3 — aggregates, distinct, and the error rule
+
+**Objective (§6):** complete the stateful core. The engine now implements the whole surface
+`docs/SEMANTICS.md` defines, and the differential gate sweeps **every** scenario the generator
+produces.
+
+C3 ran in three parts, in this order: settle **Q-2** doc-first; prove float rendering lossless
+*before* the first float could flow; then build the aggregates.
+
+### Part 1 — Q-2, closed by D-16
+
+C1 found the oracle and the circuit disagreeing about an evaluation error's lifetime. C3 opened by
+deciding it in `docs/SEMANTICS.md` before touching operator code (S-22, S-22a…S-22d), recording the
+reasoning as **D-16**, then implementing oracle-first and engine-second.
+
+**The rule.** The answer at epoch N is either a Z-set or an error, determined by the *contents* at
+epoch N. Data that raises means the query has no answer while it is present; retract it and the
+answer returns.
+
+**Why the alternative lost.** An error as a property of the *change* is not merely different — it is
+incompatible with **I-3**. Dropping the epoch that raised means the next epoch lands on contents
+that never absorbed it, leaving the answer a mixture of epoch N−1 and N+1. The epoch now seals and
+only the *answer* is an error.
+
+**The mechanism is a Z-set**, which is why it is small: a row that raises contributes its message at
+the row's weight, so retracting the row retracts the error by the same arithmetic (I-5 applied to
+errors). The engine integrates the error stream into a result store exactly like the answer stream,
+and "the least live message" (S-22c) is the first row of its canonical form.
+
+| Claim | Test |
+| --- | --- |
+| An error lasts exactly while the offending data is present, and no longer | `s22_an_error_lasts_while_the_offending_data_is_present_and_no_longer` |
+| With several live errors the least message is reported | `s22c_the_least_live_error_message_is_reported` |
+| For an aggregate the unit is the group | `s22a_a_group_whose_aggregate_overflows_makes_the_answer_an_error` |
+| Batching the history differently changes neither answer nor error | `s22d_batching_does_not_change_the_answer_or_the_error` |
+| The epoch **seals** and the answer is the error; retraction restores everything the erroring epochs carried | `an_evaluation_error_seals_its_epoch_and_lasts_while_the_row_does` |
+
+**A C1 test was wrong and was replaced, not deleted.**
+`an_evaluation_error_aborts_the_step_without_advancing_the_epoch` asserted the I-3-violating
+behaviour. Its replacement asserts the opposite and says why.
+
+**The gate population moved, deliberately.** Raising expressions now enter the generator — division
+by a column (2/3 of divisions) and `i64::MAX` literals (1/12), so two *kinds* of error can be live
+at once, which is what exercises S-22c. The `error_answers == 0` fences are replaced by
+`error_answers > 0`: the sweep passing already means both sides agreed at every comparison, error
+text included, and the assertion now says the population is not vacuous. Every quoted number in
+`testing/evidence/registry.json` was regenerated and two new generator constants recorded — with the
+honest note that the raising rate is set by how often arithmetic appears at all, not by the knob
+(moving the column-divisor rate from 1/3 to 5/6 shifted the count only from 14 to 15 scenarios), so
+specific error behaviours are pinned by handwritten scenarios instead.
+
+### Part 2 — float rendering, proven lossless before the first float
+
+`AVG` is the only source of a `Float64` (S-3), and its exemption from the no-floats rule rests
+entirely on both implementations doing one identical division and producing identical bits (D-10,
+S-31). That is worth nothing if the *comparison* throws bits away — and the harness compares
+**rendered strings**.
+
+| Claim | Test |
+| --- | --- |
+| Distinct bit patterns never render identically | `distinct_bit_patterns_never_render_identically` |
+| Rendering round-trips to the same bits | `rendering_round_trips_to_the_same_bits` |
+| `-0.0` and `0.0` render apart, as S-7 orders them apart | `negative_zero_renders_differently_from_positive_zero` |
+| 200,000 seeded arbitrary bit patterns, injective and round-tripping | `a_large_sweep_of_bit_patterns_renders_losslessly` |
+| The property AVG's exemption rests on | `avgs_arithmetic_is_bit_stable_through_rendering` |
+
+Every check goes through a real `ZSetBatch` canonical form, not through `format!` directly, so it
+proves the path an answer actually takes. `NaN` is the one value where rendering is legitimately not
+injective; it cannot arise (S-31) and is skipped for a stated reason.
+
+### Part 3 — the exit gate
+
+| Gate condition (§6 C3) | Proven by | Result |
+| --- | --- | --- |
+| Differential green over aggregate scenarios **heavy on retractions** | `engine_vs_oracle_over_randomized_aggregate_scenarios` | 2,192 aggregate scenarios · 10,154 epochs · **12,346 comparisons · 0 divergences**, 85 of them a shared live error |
+| Retract the current MIN, second-smallest surfaces | `retracting_the_current_min_reveals_the_second_smallest` | and `a_multiplicity_must_be_drained_before_the_min_moves` |
+| Drain a group to zero, the row **vanishes** (not zeroes) | `a_group_drained_to_zero_vanishes_leaving_no_phantom_row` | plus vanish-and-return, and churn-within-one-epoch |
+| AVG over retractions lands exactly on the oracle's value | `avg_over_retractions_lands_exactly_on_the_oracles_value` | |
+
+Of the 2,192 gate scenarios, **1,801 contain a retraction**, 1,739 use a weight above 1, 522 use
+`DISTINCT`, and 943 of the 1,084 join-aggregate scenarios change both join sides in one epoch — so
+C2's delta-delta coverage assertion extends to the new families rather than lapsing.
+
+**224 tests across the workspace**, zero ignored, zero skipped, zero flaky (two consecutive full
+runs, identical).
+
+### The cliffs, each with its own isolating test
+
+| Cliff | Test |
+| --- | --- |
+| MIN/MAX keep an ordered multiset (S-30, §5.3) | `retracting_the_current_min_reveals_the_second_smallest`, `min_and_max_work_on_strings_and_use_the_total_order` |
+| A drained group vanishes (S-29) | `a_group_drained_to_zero_vanishes_leaving_no_phantom_row`, `a_group_can_vanish_and_return`, `a_group_created_and_drained_in_one_epoch_never_appears` |
+| SUM transits `i128`, lands in `i64`, or raises | `a_sum_that_transits_out_of_range_and_returns_is_correct`, `a_sum_that_does_not_fit_raises_and_the_error_clears_when_the_data_leaves` |
+| AVG is one division of two exact integers (S-31) | `avg_over_retractions_lands_exactly_on_the_oracles_value` |
+| Grouping uses not-distinct while `ON` uses `=` — **in one query** | `grouping_groups_nulls_together_while_a_join_key_never_matches_a_null` |
+| `COUNT(x)` is 0 where `SUM` is NULL (S-30's asymmetry) | `avg_of_an_all_null_group_is_null` |
+| HAVING filters groups both ways as they change (S-32) | `having_filters_groups_and_a_null_predicate_rejects` |
+| DISTINCT collapses weights and tracks presence incrementally (S-34) | `distinct_collapses_weights_and_tracks_presence_incrementally` |
+
+**The state layout is chosen by MIN/MAX.** Per group and per aggregate slot, an *ordered multiset* of
+the argument's values, keyed `[slot, group key…, value]` so a prefix scan returns them in value order
+(D-15, S-7). MIN is the first entry, MAX the last, and retracting the current minimum reveals the
+next because the next was never thrown away. The same multiset serves SUM, COUNT and AVG by folding
+it — O(distinct values in the changed group), which is the honest cost of a layout chosen for
+correctness under retraction, and a C10 concern. **No performance claim is made.**
+
+**Aggregation is deliberately *not* shared with the oracle.** The scalar expression library is shared
+(D-14) because §6 C5 says so; aggregation is implemented twice, because the cliffs above are exactly
+what I-1 is for and sharing the code would have removed the signal.
+
+### The gate's teeth, and a lesson about proving them
+
+Two canonical mutations, both reverted:
+
+| Mutation | Caught by |
+| --- | --- |
+| **MIN/MAX never forget a retracted value** (the single-value bug in effect) | 8 tests, randomized gate at **seed 4, epoch 3** |
+| **A drained group emits a phantom `(key, 0)` row** (§6 C3's named pitfall) | 14 tests, including the whole-population sweep |
+
+**A first attempt at the MIN/MAX mutation silently failed to apply** — `rustfmt` had collapsed the
+target expression onto one line, so the patch matched nothing and the suite passed. A mutation that
+does not land proves the opposite of what it appears to. Both mutations are now applied with a marker
+that is grepped for before the run, and that check is the reason the first attempt was caught rather
+than believed.
+
+### I-9: no new placeholder
+
+| Operator | Declares | Why that factor |
+| --- | --- | --- |
+| `Aggregate` | `1 + aggregates` × input | one entry per group for the total, plus one per (slot, distinct value) |
+| `Distinct` | 1 × input | one entry per distinct input row |
+
+`ProportionalToInputs` gained a **declared constant factor**, because a four-aggregate operator
+legitimately keeps more entries than it received rows and the C2 check would have failed it. The
+factor must be *justified* — a reader should be able to count the entries it claims — not raised
+until the check passes; a wrong *complexity* still fails whatever the constant.
+
+One real inconsistency was found and fixed while writing this: the state fingerprint computed its
+budget **without** the factor while the checker applied it, so the printed accounting disagreed with
+the enforced one. Both now come from one function (`Circuit::state_budget`).
+
+### What C3 does **not** prove
+
+- **Nothing about durability.** Aggregate and distinct state is in memory with no checkpoint. C4.
+- **Nothing about SQL.** Circuits are still hand-built; the incrementalizer is C5. `DISTINCT` arrived
+  in C3 because §6 C3's build list names it, ahead of its rung — recorded as **D-17**, and the rest
+  of rung 4 (`UNION ALL`, `ORDER BY`/`LIMIT`) is not implemented.
+- **Grand-total aggregation is still refused** (`EmptyGroupKeys`, S-33) and **Q-3 is still open**,
+  now the only open question that C5 must settle.
+- **No performance claim.** `MemBackend`'s prefix scan is a linear walk and the aggregate folds a
+  changed group's whole multiset. The engine-constant section of the ledger is still empty and
+  `no_engine_constant_steers_behaviour_without_a_receipt` fails if that changes without a receipt.
+- **A bug in shared code is still invisible to I-1.** The scalar library and the binder are shared
+  (D-14); `current-plan`'s own tests pin them to `docs/SEMANTICS.md` directly.
+
+### What C4 needs
+
+- **The seam is already in place.** Operator state lives behind `StateBackend` (§5.5, D-15), so
+  `RocksBackend` slots in without touching an operator. C4's job on the trait is to add the **named
+  snapshots** D-15 deliberately left out, once the checkpoint protocol is designed.
+- **What must be checkpointed is enumerable.** Three operators hold state — join (two indexes),
+  aggregate (one backend), distinct (one backend) — plus the circuit's result store, its live-error
+  store, and `emitted_entries`, which is I-9 accounting and is state too. A recovery that restored
+  the stores but not the counter would pass every answer test and then mis-account.
+- **I-2 is already the shape I-7 needs.** `state_fingerprint` renders every operator's state and both
+  stores deterministically, and the I-2 gates compare it across runs. Comparing a recovered circuit
+  to its uncrashed twin is the same comparison with a crash in the middle.
+- **fsync ordering must be written down before it is implemented** (§6 C4's pitfall): state flush →
+  checkpoint record → log trim, in a doc comment, with the crash harness killing between each pair.
+- **`EpochDeltas` should move to `current-log`.** It sits in `current-zset` because C4 had not
+  happened yet (D-14); C4 is when the write path arrives and it can go where §5.4 puts it.
+
+Per the sprint protocol in `CLAUDE.md`, **C4 does not begin in the session that finished C3.**

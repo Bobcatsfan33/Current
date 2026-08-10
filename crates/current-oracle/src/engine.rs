@@ -282,7 +282,24 @@ impl Oracle {
             return Err(OracleError::Plan(error));
         }
 
-        let entries = consolidate(relation.entries)?;
+        let mut entries = consolidate(relation.entries)?;
+
+        // DISTINCT, last of all (S-34): every row present at all appears exactly once. Applied to
+        // the consolidated answer, so "present" means total weight above zero.
+        if query.distinct {
+            for (_, weight) in &mut entries {
+                // S-34 is defined on non-negative weights, and every stage from a table integral
+                // onward preserves non-negativity. Checked rather than assumed: collapsing a
+                // negative weight to 1 would invent a row.
+                if *weight < 0 {
+                    return Err(OracleError::NegativeIntermediate {
+                        stage: "DISTINCT input",
+                        weight: *weight,
+                    });
+                }
+                *weight = 1;
+            }
+        }
         Ok(ZSetBatch::from_entries(bound.output_schema, entries)?)
     }
 

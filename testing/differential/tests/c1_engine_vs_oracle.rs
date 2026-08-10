@@ -305,12 +305,15 @@ fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
     );
 }
 
-/// What the engine cannot do, it refuses by name — it does not answer something else.
+/// The engine now implements the whole surface `docs/SEMANTICS.md` defines, so there is nothing left
+/// for the adapter to refuse — and this test records that rather than being deleted.
 ///
-/// The boundary moved in C2: a join is now built rather than refused, and this test moved with it
-/// rather than being deleted. What it still guarantees is that the *next* rung is refused loudly.
+/// It has moved twice. In C1 it asserted that a join and a `GROUP BY` were both refused by name; in
+/// C2 the join moved to the "builds" side; in C3 the `GROUP BY` did too. What remains is the claim
+/// that matters: everything in the dialect builds, and everything outside it is turned away by the
+/// **binder**, which names the construct (S-12) — not by a hand-written check in an adapter.
 #[test]
-fn the_engine_refuses_beyond_what_it_implements_and_names_the_sprint() {
+fn the_engine_builds_the_whole_dialect_and_the_binder_refuses_the_rest() {
     use current_differential::EngineUnderTest;
 
     let ints = |names: &[&str]| {
@@ -339,15 +342,29 @@ fn the_engine_refuses_beyond_what_it_implements_and_names_the_sprint() {
         "a rung-2 join must build now that C2 has landed"
     );
 
+    // Rung 3 arrived in C3: a GROUP BY now builds too.
     let grouped = Query::from(Source::scan("l", "l")).group_by(GroupBy {
         keys: vec![Named::new("k", Expr::column("l.id"))],
         aggregates: vec![Named::new("n", AggFunc::CountStar)],
         having: None,
     });
-    let error = CircuitEngine::build(&tables, &grouped).expect_err("a GROUP BY must be refused");
     assert!(
-        error.contains("C3"),
-        "the refusal must name the sprint: {error}"
+        CircuitEngine::build(&tables, &grouped).is_ok(),
+        "a rung-3 GROUP BY must build now that C3 has landed"
+    );
+
+    // What is still refused is refused by the binder, by name. A GROUP BY with no keys is the
+    // grand-total shape, which S-33 leaves undecided.
+    let no_keys = Query::from(Source::scan("l", "l")).group_by(GroupBy {
+        keys: vec![],
+        aggregates: vec![Named::new("n", AggFunc::CountStar)],
+        having: None,
+    });
+    let error = CircuitEngine::build(&tables, &no_keys)
+        .expect_err("a GROUP BY with no keys must be refused (S-33)");
+    assert!(
+        error.contains("grand-total"),
+        "the refusal must name what it refused: {error}"
     );
 
     // And a rung-1 query over the same tables does build, so the refusals above are about the

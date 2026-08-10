@@ -6,14 +6,14 @@
 //!
 //! ## What it supports, and what it refuses by name
 //!
-//! Dialect rungs 1 and 2: a scan or an INNER equi-join, with an optional `WHERE` and an optional
-//! projection. `GROUP BY` is C3 and is refused with a message that says so. Refusing loudly
-//! matters: an engine that quietly answered something else for a query it cannot run would show up
-//! as a correctness failure whose cause is a missing feature, and the harness would be reporting a
-//! bug that is not there.
+//! Dialect rungs 1–3 plus `DISTINCT`: a scan or an INNER equi-join, an optional `WHERE`, an optional
+//! `GROUP BY` with aggregates and `HAVING`, an optional projection, and an optional `DISTINCT`. That
+//! is the whole surface `docs/SEMANTICS.md` defines, so from C3 there is nothing left for this
+//! adapter to refuse — the refusals that remain live in the binder, which turns away anything outside
+//! the dialect by name (S-12).
 
 use current_circuit::{Circuit, CircuitBuilder, NodeId};
-use current_ops::{Filter, Join, Operator, Project};
+use current_ops::{Aggregate, Distinct, Filter, Join, Operator, Project};
 use current_plan::bind::{bind, bind_source, Catalog, Naming};
 use current_plan::plan::{Query, Source};
 use current_state::MemBackend;
@@ -36,7 +36,16 @@ impl CircuitEngine {
     /// shrink the day a build started failing for an unrelated reason.
     #[must_use]
     pub fn claims(scenario: &Scenario) -> bool {
-        matches!(scenario.family, Family::FilterProject | Family::Join)
+        matches!(
+            scenario.family,
+            Family::FilterProject | Family::Join | Family::Aggregate | Family::JoinAggregate
+        )
+    }
+
+    /// True if the scenario groups — the predicate the C3 gate sweeps on.
+    #[must_use]
+    pub fn claims_aggregate(scenario: &Scenario) -> bool {
+        matches!(scenario.family, Family::Aggregate | Family::JoinAggregate)
     }
 
     /// True if the scenario is a join — used by the C2 gate to sweep the rung-2 population.
@@ -114,15 +123,6 @@ impl EngineUnderTest for CircuitEngine {
     fn build(tables: &[(String, Schema)], query: &Query) -> Result<Self, String> {
         let catalog: Catalog = tables.iter().cloned().collect();
 
-        if query.group_by.is_some() {
-            return Err(
-                "current-circuit runs dialect rungs 1 and 2 — a scan or an INNER equi-join, with \
-                 an optional WHERE and projection. GROUP BY and the aggregates are the C3 \
-                 operators."
-                    .to_owned(),
-            );
-        }
-
         // Bind once, through the shared binder, so the circuit's idea of the answer's schema is
         // the oracle's idea of it by construction rather than by coincidence (D-14, S-8).
         let bound = bind(query, &catalog).map_err(|e| e.to_string())?;
@@ -130,8 +130,7 @@ impl EngineUnderTest for CircuitEngine {
         let mut builder = CircuitBuilder::new();
         let (mut tip, source_schema) = build_source(&mut builder, &query.source, &catalog)?;
 
-        // Before a GROUP BY every column is written `alias.column` (S-10), and this circuit never
-        // has a GROUP BY, so the naming is qualified throughout.
+        // WHERE, over the source's qualified columns (S-10).
         if let Some(predicate) = &query.filter {
             let filter = Filter::new(source_schema.clone(), Naming::Qualified, predicate.clone())
                 .map_err(|e| e.to_string())?;
@@ -140,11 +139,58 @@ impl EngineUnderTest for CircuitEngine {
                 .map_err(|e| e.to_string())?;
         }
 
-        if let Some(items) = &query.project {
-            let project = Project::new(source_schema, Naming::Qualified, items.clone())
+        // GROUP BY, then HAVING. Grouping erases the input schema (S-27), so everything after it is
+        // named unqualified — and HAVING is just a filter over the group output (S-32), which is why
+        // it needs no operator of its own.
+        let scope_schema = match &query.group_by {
+            None => source_schema,
+            Some(group_by) => {
+                let aggregate = Aggregate::new(
+                    source_schema,
+                    bound.grouped_schema.clone(),
+                    group_by.keys.clone(),
+                    group_by.aggregates.clone(),
+                    Box::new(MemBackend::new()),
+                )
                 .map_err(|e| e.to_string())?;
+                tip = builder
+                    .add(Box::new(aggregate), vec![tip])
+                    .map_err(|e| e.to_string())?;
+
+                if let Some(having) = &group_by.having {
+                    let filter = Filter::new(
+                        bound.grouped_schema.clone(),
+                        Naming::Unqualified,
+                        having.clone(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    tip = builder
+                        .add(Box::new(filter), vec![tip])
+                        .map_err(|e| e.to_string())?;
+                }
+                bound.grouped_schema.clone()
+            }
+        };
+
+        let naming = if query.group_by.is_some() {
+            Naming::Unqualified
+        } else {
+            Naming::Qualified
+        };
+
+        if let Some(items) = &query.project {
+            let project =
+                Project::new(scope_schema, naming, items.clone()).map_err(|e| e.to_string())?;
             tip = builder
                 .add(Box::new(project), vec![tip])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // DISTINCT, last of all (S-34).
+        if query.distinct {
+            let distinct = Distinct::new(bound.output_schema.clone(), Box::new(MemBackend::new()));
+            tip = builder
+                .add(Box::new(distinct), vec![tip])
                 .map_err(|e| e.to_string())?;
         }
 

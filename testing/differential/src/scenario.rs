@@ -535,6 +535,12 @@ fn generate_query(
         query = query.project(items);
     }
 
+    // DISTINCT, one query in four (S-34). Applied last, after the projection, and it changes no
+    // schema — only weights — so it needs no re-binding.
+    if rng.chance(1, 4) {
+        query = query.distinct();
+    }
+
     // Bind the finished query once more: a query that leaves this function must bind, and
     // proving it here means a bind failure downstream is a bug in the *binder*, not the
     // generator. Nothing else in the harness has to wonder which it was.

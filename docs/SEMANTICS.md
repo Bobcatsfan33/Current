@@ -1,13 +1,15 @@
 # SEMANTICS — what a query means in Current
 
-**Scope: dialect rungs 1–3** (ARCHITECTURE.md §5.6):
+**Scope: dialect rungs 1–3** (ARCHITECTURE.md §5.6), **plus `DISTINCT`**:
 
 1. SELECT / WHERE / projection with the scalar expression library
 2. INNER equi-JOIN
 3. GROUP BY + SUM/COUNT/MIN/MAX/AVG + HAVING
+4. …of which `DISTINCT` only — §6 C3's build list names it, so it arrives with the aggregates
+   rather than with the rest of rung 4 (S-34, D-17)
 
-Rungs 4 (DISTINCT, UNION ALL, ORDER BY/LIMIT) and 5 (LEFT JOIN, decorrelatable subqueries) are
-**not** defined here and are not implemented. Anything not defined in this document is refused by
+The rest of rung 4 (`UNION ALL`, `ORDER BY`/`LIMIT`) and rung 5 (`LEFT JOIN`, decorrelatable
+subqueries) are **not** defined here and are not implemented. Anything not defined in this document is refused by
 name, never silently accepted.
 
 **This document is written before the code.** Per §10, semantics change here first, in
@@ -487,6 +489,38 @@ type-check in Rust. Unrepresentable is a stronger guarantee than refused. The na
 becomes real work in C5, when SQL text — which certainly can write `HAVING COUNT(*) > 2` — reaches
 the binder.
 
+### S-34 · `DISTINCT` keeps one copy of every row that is present
+
+`DISTINCT` maps a Z-set with non-negative weights to one in which every row present at all appears
+exactly once:
+
+```text
+distinct(z)[row] = 1  if z[row] > 0
+                   0  otherwise
+```
+
+It is applied **last**, after the projection — `SELECT DISTINCT` de-duplicates the rows the query
+would otherwise return, not the rows it read.
+
+Three consequences worth stating, because each is a place a naive implementation goes wrong:
+
+- **Weights collapse, they do not saturate.** A row at weight 7 becomes weight 1, and a row at
+  weight 1 stays weight 1. `DISTINCT` is the one operator in Current whose output weight is not a
+  sum or a product of its input weights.
+- **It is stateful, and it is the reason.** Incrementally, the output changes only when a row
+  crosses between absent and present. That is a question about the row's *integral*, not about the
+  delta, so the operator must remember the integral of its input: `Δout[row] = sign(I[row] + Δ[row])
+  − sign(I[row])`. An implementation that looked only at the delta would emit a spurious `+1` every
+  time an already-present row gained another copy.
+- **Nulls are values here.** Two rows that are equal — including equal in their nulls — are one row
+  (the same "not distinct from" notion as grouping, S-28, and *not* the three-valued `=` of S-13).
+  This falls out of Z-set row equality and needs no special case.
+
+`DISTINCT` over an input that could hold negative weights is not defined, and cannot arise: it is
+applied to a query's output, and every stage from a table integral onward preserves
+non-negativity — filter and projection carry weights through, a join multiplies non-negatives, and
+an aggregate emits weight 1 per group.
+
 ### S-33 · Aggregation without GROUP BY is not in rungs 1–3
 
 A query with aggregates and no group keys (`SELECT COUNT(*) FROM t` — the "grand total" shape) has
@@ -507,7 +541,6 @@ Refused by name, and the name is the point:
 
 | Construct | Refusal | Arrives |
 | --- | --- | --- |
-| `DISTINCT` | `NotInDialect("DISTINCT")` | rung 4 |
 | `UNION ALL` | `NotInDialect("UNION ALL")` | rung 4 |
 | `ORDER BY` / `LIMIT` | `NotInDialect("ORDER BY")` | rung 4, at read time (D-7) |
 | `LEFT`/`RIGHT`/`FULL JOIN` | `NotInDialect("OUTER JOIN")` | rung 5 |
@@ -535,7 +568,7 @@ S-22c the least message is reported · S-22d errors are deterministic ·
 S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-26 join multiplies
 weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
 groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·
-S-32 HAVING · S-33 grand-total aggregation is undecided.
+S-32 HAVING · S-33 grand-total aggregation is undecided · S-34 DISTINCT.
 
 Three rules were added after the first draft, when writing the oracle exposed questions the draft
 had not answered. They are recorded in place rather than appended, and the additions are: null

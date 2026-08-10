@@ -64,6 +64,8 @@ jobs:
         run: cargo test -p current-differential --locked --test c1_engine_vs_oracle -- --nocapture
       - name: The C2 differential gate (join — the three-term rule)
         run: cargo test -p current-differential --locked --test c2_join -- --nocapture
+      - name: The C3 differential gate (aggregates, distinct, and the whole population)
+        run: cargo test -p current-differential --locked --test c3_aggregate -- --nocapture
 
   no-network:
     name: no-network

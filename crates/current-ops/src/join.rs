@@ -201,6 +201,8 @@ impl Operator for Join {
     fn state_bound(&self) -> StateBound {
         StateBound::ProportionalToInputs {
             inputs: JOIN_INPUTS,
+            // One index entry per row on each side, and nothing else.
+            factor: 1,
         }
     }
 

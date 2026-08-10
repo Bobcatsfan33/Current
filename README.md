@@ -19,23 +19,24 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C2 complete
+## Status: Sprint C3 complete
 
 Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
 
-**What exists today:** the correctness machinery (C0), the incremental engine's machinery (C1),
-and the first bilinear operator (C2). A query over one or two tables — a scan or an INNER
-equi-join, with a `WHERE` and a projection — compiles to a circuit that maintains its answer from
-deltas and never re-reads the input. Every answer is checked against a from-scratch recomputation
-at every sealed epoch, over ~1,100 rung-1 and ~1,100 rung-2 randomized scenarios full of
-retractions, weight multiplicities, and same-epoch updates.
+**What exists today:** the whole query surface `docs/SEMANTICS.md` defines. A scan or an INNER
+equi-join, an optional `WHERE`, `GROUP BY` with `SUM`/`COUNT`/`MIN`/`MAX`/`AVG` and `HAVING`, a
+projection, and `DISTINCT` — compiled to a circuit that maintains its answer from deltas and never
+re-reads the input. Every answer is checked against a from-scratch recomputation at every sealed
+epoch, over **all 4,400** randomized scenarios the generator produces: 24,747 answer comparisons,
+zero divergences, and the scenarios are full of retractions, weight multiplicities, same-epoch
+updates, and expressions that raise.
 
-**What does not exist yet:** no aggregation (C3), no durability (C4), no SQL (C5) — circuits are
-hand-built — no shared circuitry (C6), no server (C9). Nothing here is usable as a database today,
-and nothing here is fast: operator state is a `BTreeMap` walked linearly per probe, operators
-materialise rows out of the columnar batch, and `current-oracle` is *deliberately* slow, because
-its job is to be obviously correct, not quick.
+**What does not exist yet:** no durability (C4), no SQL (C5) — circuits are hand-built — no shared
+circuitry (C6), no server (C9). Nothing here is usable as a database today, and nothing here is
+fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
+group's whole value multiset, and `current-oracle` is *deliberately* slow, because its job is to be
+obviously correct, not quick.
 
 **Numbers we publish:** none. Per invariant I-10, no performance claim is made without a
 committed, reproducible benchmark artifact, and no such artifact exists yet. When they exist
@@ -70,7 +71,7 @@ from scratch, every time, in CI.
 crates/current-zset/     Z-set batches over Arrow; weight algebra; consolidation
 crates/current-plan/     the logical plan, the binder, the scalar expression library
 crates/current-oracle/   the naive reference engine — the spec, and the arbiter of disputes
-crates/current-ops/      circuit operators: filter, project, and the equi-join
+crates/current-ops/      circuit operators: filter, project, equi-join, aggregate, distinct
 crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
 crates/current-state/    the StateBackend trait and MemBackend: operator state behind an interface
 testing/differential/    the oracle harness: seeded scenarios, engine vs oracle, every epoch
@@ -81,10 +82,11 @@ docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 `current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
-**Known limitations, before you find them:** an evaluation error means something different to the
-incremental engine than to the oracle, so both differential gates currently run only on scenarios
-that cannot raise — open question **Q-2**, scheduled to be decided at the start of C3.
-`MemBackend`'s prefix scan is a linear walk, which is the wrong complexity for a join.
+**Known limitations, before you find them:** grand-total aggregation (`SELECT COUNT(*) FROM t`, with
+no `GROUP BY`) is refused — open question **Q-3**, to be settled in C5. There is no non-integer
+arithmetic at all: `Float64` is a result-only type produced solely by `AVG`, and fixed-point decimals
+are open question **Q-1**. `MemBackend`'s prefix scan is a linear walk, which is the wrong complexity
+for a join, and nothing has been benchmarked.
 
 Crates named in §5 that do not appear above have not been written yet.
 

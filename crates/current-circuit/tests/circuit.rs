@@ -411,7 +411,10 @@ mod accounting {
     }
 
     fn one_input() -> StateBound {
-        StateBound::ProportionalToInputs { inputs: &["only"] }
+        StateBound::ProportionalToInputs {
+            inputs: &["only"],
+            factor: 1,
+        }
     }
 
     /// An operator whose state grows faster than its input is caught, with the budget named.
@@ -500,6 +503,7 @@ mod accounting {
         let source = builder.source("t", "t", input_schema()).unwrap();
         let bound = StateBound::ProportionalToInputs {
             inputs: &["left", "right"],
+            factor: 1,
         };
         let err = builder
             .add(Box::new(hoarder(bound, 1, 1)), vec![source])

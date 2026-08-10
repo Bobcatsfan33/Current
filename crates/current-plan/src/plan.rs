@@ -254,6 +254,10 @@ pub struct Query {
     pub filter: Option<Expr>,
     pub group_by: Option<GroupBy>,
     pub project: Option<Vec<Named<Expr>>>,
+    /// `SELECT DISTINCT`: keep one copy of every row present in the answer (S-34).
+    ///
+    /// Applied **last**, after the projection. It changes no schema, only weights.
+    pub distinct: bool,
 }
 
 impl Query {
@@ -264,6 +268,7 @@ impl Query {
             filter: None,
             group_by: None,
             project: None,
+            distinct: false,
         }
     }
 
@@ -282,6 +287,13 @@ impl Query {
     #[must_use]
     pub fn project(mut self, project: Vec<Named<Expr>>) -> Query {
         self.project = Some(project);
+        self
+    }
+
+    /// `SELECT DISTINCT` (S-34).
+    #[must_use]
+    pub fn distinct(mut self) -> Query {
+        self.distinct = true;
         self
     }
 }

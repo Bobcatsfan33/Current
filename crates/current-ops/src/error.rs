@@ -48,4 +48,9 @@ pub enum OpError {
     /// an operator that assumes its own state is well-formed cannot say when it is not.
     #[error("internal: a join index key is shorter than its join key")]
     CorruptJoinIndex,
+
+    /// An aggregate state key with no value component. Unreachable — every multiset key this
+    /// operator writes ends in the argument's value — and reported rather than assumed.
+    #[error("internal: an aggregate state key is missing its value component")]
+    CorruptAggregateState,
 }

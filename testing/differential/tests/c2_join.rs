@@ -561,7 +561,7 @@ fn the_joins_state_is_accounted_against_its_declaration() {
         let fingerprint = engine.state_fingerprint().unwrap();
         for line in fingerprint.lines().filter(|l| l.contains(" join ")) {
             assert!(
-                line.contains("state_bound=proportional to left + right"),
+                line.contains("proportional to left + right"),
                 "the join must declare its bound: {line}"
             );
             let size = field(line, "state_size=");

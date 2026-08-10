@@ -208,6 +208,29 @@ that the two implementations agree about *which* epochs raise and *what they say
 neither raised. The generator's ledger receipts were regenerated as part of the same change, because
 the measured population moved.
 
+### D-17 · `DISTINCT` arrives in C3, ahead of its rung, because §6 puts it there
+
+*Sprint: C3. Preserves: I-1. Recorded in `docs/SEMANTICS.md` S-34.*
+
+`ARCHITECTURE.md` §5.6 places `DISTINCT` on **rung 4** of the dialect ladder, alongside `UNION ALL`
+and `ORDER BY`/`LIMIT`. §6 C3's build list names it directly: "GROUP BY with SUM/COUNT/AVG … ;
+DISTINCT; HAVING as post-aggregate filter."
+
+Both statements are in the architecture of record and they do not quite agree, so this records which
+governs what. **§5.6's ladder describes the order the *dialect* grows in; §6 describes what each
+*sprint* builds.** Where a sprint's build list names a construct, the sprint list wins for sprint
+content — it is the more specific instruction, and §6 is the section a sprint is executed from.
+`DISTINCT` is therefore implemented in C3 and the rest of rung 4 is not.
+
+**Why it fits here rather than being awkward.** `DISTINCT` is the third kind of stateful operator, and
+C3 is the sprint about stateful operators. It also needs exactly the machinery the aggregate needs:
+an integral of its input, kept behind `StateBackend`, with a declared bound (I-9). Building it
+alongside the aggregates costs one operator; building it in a later sprint would mean revisiting the
+same ground.
+
+**What changes in the plan.** `Query` gains a `distinct: bool`, applied after the projection. That is
+a widening of the plan IR both doors will share (D-14), so it is recorded rather than slipped in.
+
 ---
 
 ## Open questions
