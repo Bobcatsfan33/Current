@@ -416,6 +416,75 @@ impl Circuit {
         Ok(())
     }
 
+    /// Serialise everything this circuit holds, for a checkpoint (`docs/DURABILITY.md` C1).
+    ///
+    /// **All of it**, and the list is worth reading because a recovery that restored some of it would
+    /// pass every answer test and then misbehave later:
+    ///
+    /// - the epoch, so a recovered circuit knows where the log suffix starts;
+    /// - the result store — the answer itself;
+    /// - the live-error store, or a recovered query would forget that it has no answer (S-22);
+    /// - `emitted_entries`, which is I-9 accounting. Restoring the stores but not the counter would
+    ///   leave every operator's state budget wrong, and the failure would look like a state-bound
+    ///   violation rather than a lost counter;
+    /// - each operator's own state, in node order.
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&(self.emitted_entries.len() as u32).to_be_bytes());
+        for count in &self.emitted_entries {
+            out.extend_from_slice(&(*count as u64).to_be_bytes());
+        }
+        push_block(&mut out, &self.result.snapshot()?);
+        push_block(&mut out, &self.error_store.snapshot()?);
+        for node in &self.nodes {
+            let block = match node {
+                Node::Source { .. } => Vec::new(),
+                Node::Operator { op, .. } => op.snapshot()?,
+            };
+            push_block(&mut out, &block);
+        }
+        Ok(out)
+    }
+
+    /// Restore a circuit from a snapshot. The circuit must have the same shape it had when the
+    /// snapshot was taken — recovery rebuilds it from the same plan, so it does.
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        let mut epoch_raw = [0u8; 8];
+        epoch_raw.copy_from_slice(bytes.get(0..8).ok_or(CircuitError::CorruptSnapshot)?);
+        self.epoch = u64::from_be_bytes(epoch_raw);
+
+        let mut count_raw = [0u8; 4];
+        count_raw.copy_from_slice(bytes.get(8..12).ok_or(CircuitError::CorruptSnapshot)?);
+        let counters = u32::from_be_bytes(count_raw) as usize;
+        if counters != self.nodes.len() {
+            return Err(CircuitError::CorruptSnapshot);
+        }
+        let mut at = 12usize;
+        self.emitted_entries.clear();
+        for _ in 0..counters {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(bytes.get(at..at + 8).ok_or(CircuitError::CorruptSnapshot)?);
+            self.emitted_entries.push(u64::from_be_bytes(raw) as usize);
+            at += 8;
+        }
+
+        let (result_block, next) = take_block(bytes, at)?;
+        self.result.restore(result_block)?;
+        let (error_block, next) = take_block(bytes, next)?;
+        self.error_store.restore(error_block)?;
+
+        let mut at = next;
+        for index in 0..self.nodes.len() {
+            let (block, next) = take_block(bytes, at)?;
+            if let Some(Node::Operator { op, .. }) = self.nodes.get_mut(index) {
+                op.restore(block)?;
+            }
+            at = next;
+        }
+        Ok(())
+    }
+
     /// A deterministic rendering of everything this circuit holds.
     ///
     /// This is what the I-2 gate compares between two runs of one scenario. Answers alone are not
@@ -470,6 +539,21 @@ impl Circuit {
         }
         Ok(out)
     }
+}
+
+fn push_block(out: &mut Vec<u8>, block: &[u8]) {
+    out.extend_from_slice(&(block.len() as u32).to_be_bytes());
+    out.extend_from_slice(block);
+}
+
+fn take_block(bytes: &[u8], at: usize) -> Result<(&[u8], usize)> {
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(bytes.get(at..at + 4).ok_or(CircuitError::CorruptSnapshot)?);
+    let len = u32::from_be_bytes(raw) as usize;
+    let block = bytes
+        .get(at + 4..at + 4 + len)
+        .ok_or(CircuitError::CorruptSnapshot)?;
+    Ok((block, at + 4 + len))
 }
 
 fn node_schema(nodes: &[Node], id: NodeId) -> Result<&Schema> {

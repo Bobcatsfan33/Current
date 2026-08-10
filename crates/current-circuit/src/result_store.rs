@@ -108,6 +108,27 @@ impl ResultStore {
     pub fn canonical(&self) -> Result<Canonical> {
         Ok(self.contents()?.canonical()?)
     }
+
+    /// Serialise the integral for a checkpoint (`docs/DURABILITY.md` C1).
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        let entries: Vec<(Vec<current_zset::Value>, i64)> = self
+            .integral
+            .iter()
+            .map(|(row, weight)| (row.values().to_vec(), *weight))
+            .collect();
+        Ok(current_state::encode_entries(&entries))
+    }
+
+    /// Replace the integral with a snapshot.
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        let entries = current_state::decode_entries(bytes)
+            .map_err(|e| CircuitError::Snapshot(e.to_string()))?;
+        self.integral = entries
+            .into_iter()
+            .map(|(values, weight)| (Row::new(values), weight))
+            .collect();
+        Ok(())
+    }
 }
 
 #[cfg(test)]

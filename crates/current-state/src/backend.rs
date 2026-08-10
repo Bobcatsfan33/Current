@@ -85,4 +85,22 @@ pub trait StateBackend: fmt::Debug + Send {
 
     /// Every entry, in key order. For fingerprints and tests; not a hot path.
     fn iter_all(&self) -> Result<Vec<(Key, i64)>>;
+
+    /// Serialise the whole backend, for a checkpoint (`docs/DURABILITY.md` C1).
+    ///
+    /// D-15 recorded that named snapshots were deliberately absent until C4 designed the checkpoint
+    /// protocol. This is that addition, and it is the last one: §5.5 freezes this trait at C4's exit.
+    ///
+    /// A snapshot is bytes rather than a backend-defined handle because a checkpoint has to be a
+    /// *file* — publishable by rename, checksummable, and readable by a process that has not opened
+    /// the backend yet (C3, C4 of the checkpoint sequence).
+    fn snapshot(&self) -> Result<Vec<u8>>;
+
+    /// Replace the backend's contents with a snapshot.
+    ///
+    /// Replace, not merge: recovery loads a checkpoint into a backend whose contents are unknown, and
+    /// merging would leave whatever was there. `restore` of a snapshot must give a backend that
+    /// compares equal to the one the snapshot was taken from — which is what makes I-7's
+    /// byte-identical claim checkable.
+    fn restore(&mut self, bytes: &[u8]) -> Result<()>;
 }

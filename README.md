@@ -19,7 +19,7 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C3 complete
+## Status: Sprint C4 complete (with one gap, named below)
 
 Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
@@ -32,7 +32,7 @@ epoch, over **all 4,400** randomized scenarios the generator produces: 24,747 an
 zero divergences, and the scenarios are full of retractions, weight multiplicities, same-epoch
 updates, and expressions that raise.
 
-**What does not exist yet:** no durability (C4), no SQL (C5) — circuits are hand-built — no shared
+**What does not exist yet:** no SQL (C5) — circuits are hand-built — no shared
 circuitry (C6), no server (C9). Nothing here is usable as a database today, and nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
 group's whole value multiset, and `current-oracle` is *deliberately* slow, because its job is to be
@@ -73,7 +73,9 @@ crates/current-plan/     the logical plan, the binder, the scalar expression lib
 crates/current-oracle/   the naive reference engine — the spec, and the arbiter of disputes
 crates/current-ops/      circuit operators: filter, project, equi-join, aggregate, distinct
 crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
-crates/current-state/    the StateBackend trait and MemBackend: operator state behind an interface
+crates/current-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
+crates/current-log/      the input log: a directory of files, epoch sealing, exactly-once admission
+testing/crash/           the crash harness: named seams, byte faults, recovery vs an uncrashed twin
 testing/differential/    the oracle harness: seeded scenarios, engine vs oracle, every epoch
 testing/evidence/        the ledger, and the artifacts its entries cite
 docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
@@ -86,7 +88,10 @@ recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the cod
 no `GROUP BY`) is refused — open question **Q-3**, to be settled in C5. There is no non-integer
 arithmetic at all: `Float64` is a result-only type produced solely by `AVG`, and fixed-point decimals
 are open question **Q-1**. `MemBackend`'s prefix scan is a linear walk, which is the wrong complexity
-for a join, and nothing has been benchmarked.
+for a join, and nothing has been benchmarked. **`RocksBackend` is not implemented** — D-5 calls for
+it and C4 could not build it in the development environment; `MemBackend` plus checkpoint files is what
+durability is proven over today (**D-18**). Nothing tests *power loss*: the crash harness is
+in-process, which models losing unwritten state at a named instant but not kernel write reordering.
 
 Crates named in §5 that do not appear above have not been written yet.
 

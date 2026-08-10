@@ -9,7 +9,7 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C1** — linear operators + the first real circuit | **complete; exit gate green in CI** |
 | **C2** — join | **complete; exit gate green in CI** |
 | **C3** — aggregates and distinct | **complete; exit gate green in CI** |
-| C4 — durability | not started |
+| **C4** — durability | **exit gate green in CI; `RocksBackend` NOT delivered — see below** |
 | C5 … C13 | not started |
 
 ---
@@ -657,3 +657,119 @@ the enforced one. Both now come from one function (`Circuit::state_budget`).
   happened yet (D-14); C4 is when the write path arrives and it can go where §5.4 puts it.
 
 Per the sprint protocol in `CLAUDE.md`, **C4 does not begin in the session that finished C3.**
+
+---
+
+## C4 — durability
+
+**Objective (§6):** survive death. `docs/DURABILITY.md` was written **first**, numbering every step of
+the ack, seal, checkpoint and recovery sequences and naming the instant between each pair; the crash
+harness lands on those instants.
+
+**Read the honest summary first:** the exit gate is green and `RocksBackend` is **not delivered**. The
+reasons are in **D-18** and repeated below. Everything else on §6 C4's list is done.
+
+### The exit gate
+
+| Gate condition (§6 C4) | Proven by | Result |
+| --- | --- | --- |
+| ≥10,000 randomized crash-and-recover cycles | `ten_thousand_crash_and_recover_cycles` | **10,000 cycles** · 5,767 seam faults fired · 1,832 byte-boundary faults · 604 clean runs · **18 of 18 named seams fired** |
+| Every recovery byte-identical to the never-crashed twin (I-7) | same test | state fingerprints **and** answers **and** the log's rendering, all compared |
+| Every acked batch appears exactly once (I-4) | `a_replayed_token_is_acknowledged_and_dropped`, plus the gate re-offering every token after recovery | a re-offered token that is not dropped fails the cycle |
+| A torn checkpoint is detected and the previous one used | `a_torn_checkpoint_is_detected_and_the_previous_one_is_used` | 150 scenarios, byte-corrupted checkpoints |
+| Recovery is idempotent | `recovery_is_idempotent_under_a_crash_during_recovery` | crash *during* recovery, twice, then recover: same state |
+| `StateBackend` frozen at exit | **D-18** | frozen, with its compatibility promise — and with the honest note that one implementation validated it, not two |
+
+**256 tests across the workspace**, zero ignored, zero skipped, zero flaky (two consecutive full
+runs, identical). The crash gate runs in ~42 s.
+
+### The gate's own assertions caught two harness bugs — before any engine bug
+
+This is the C3 mutation lesson, applied to crashes, and it paid immediately.
+
+1. **`0 of 10,000 cycles fired a seam fault.`** The first run of the gate reported that and failed on
+   the fault-count assertion. The cause was in the harness: `run_with_fault` returned the *recovery*
+   injector's `fired()`, which is always inert, so every cycle reported "no fault". Without that
+   assertion the gate would have passed, green, having injected nothing.
+2. **`seam RecoveryMidReplay was planned but never fired.`** The seam-coverage assertion then caught
+   that recovery seams were unreachable, because the recovery phase used an inert injector. Fixing it
+   needed a third phase — crash, crash-during-recovery, then recover for real.
+3. Fixing (2) surfaced a third bug the idempotency test caught: a run over an already-recovered
+   directory re-sealed every epoch and stepped the circuit twice, doubling every weight. Phase 1 now
+   resumes from the log rather than replaying from zero.
+
+Three real bugs, all in the test apparatus, all found by assertions about the apparatus rather than
+about the engine.
+
+### Teeth: the two canonical mutations
+
+Both applied with a marker grepped before the run — the C3 discipline — and reverted.
+
+| Mutation | Caught by |
+| --- | --- |
+| **(a) Acknowledge before the batch is durable** | all 3 crash tests fail; the recovered log differs from the twin's (I-4) |
+| **(b) Skip the torn-checkpoint detection** | `a_torn_checkpoint_is_detected_and_the_previous_one_is_used` and the 10,000-cycle gate, at seed 2 |
+
+**An honest note on mutation (a).** §6 C4 asks for "ack before the fsync completes". That exact bug is
+**not observable to an in-process harness**: `write_all` has already put the bytes in the page cache,
+which survives a simulated crash, so recovery finds the record either way. The observable form of the
+same bug class was used instead — acknowledge before the record is written at all — and it is caught.
+Detecting the literal fsync-ordering bug needs a filesystem-level fault injector or a VM that can be
+cut off mid-write. That is named as remaining work, not implied by a green gate.
+
+### What is simulated, and what is not
+
+The 10,000 cycles use **in-process fault injection**: abort at a named seam, drop every in-memory
+object, recover from disk. What that faithfully models is loss of everything not yet written, at a
+named instant. What it does **not** model is kernel-level write reordering or power loss.
+
+Consequently the gate runs with `SyncPolicy::Deferred` — `fsync` skipped — because `fsync` changes
+nothing an in-process crash can observe while costing hours on macOS. `SyncPolicy::Full` is the
+default, is what production uses, and is what the log's own durability tests use. **Nothing here tests
+power loss**, and no count in this document should be read as if it did.
+
+**There is no real-`kill -9` subprocess test.** It was planned as the check that the in-process model
+is faithful, and it is not delivered. Remaining work, named.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| A replayed token is acknowledged and dropped (A3, I-4) | `a_replayed_token_is_acknowledged_and_dropped` |
+| The same token with **different content** is refused loudly, never rewritten (A4, I-4) | `the_same_token_with_different_content_is_refused_loudly` |
+| Dedup survives a reopen, because the index is rebuilt from the log (R6) | `dedup_survives_a_reopen` |
+| A malformed batch is refused and writes nothing (A1) | `a_malformed_batch_is_refused_and_writes_nothing` |
+| A torn tail is discarded; the prefix survives (R5) | `a_torn_tail_is_discarded_and_the_prefix_survives`, `a_truncated_frame_reads_as_a_torn_tail`, `a_flipped_byte_fails_the_crc` |
+| `source_id` travels with every batch (§5.4, MutinyDB seam) | `the_source_id_survives_a_reopen` |
+| Byte order equals value order (D-15) | `byte_order_equals_value_order`, `a_seeded_sweep_agrees_on_order`, `a_component_prefix_is_a_byte_prefix` |
+| A snapshot restores to an identical backend, replacing not merging | `a_snapshot_restores_to_an_identical_backend` |
+| Faults are deterministic by seed; every seam is selectable | `a_seed_chooses_the_same_fault_every_time`, `every_seam_is_selected_by_some_seed` |
+
+### What C4 does **not** deliver
+
+- **`RocksBackend`.** §6 C4 names it and D-5 mandates it. Two independent blockers in this
+  environment: `librocksdb-sys` needs a `libclang` it cannot load here (the build script links
+  `@rpath/libclang.dylib`; `bindgen-static` needs a `libclang.a` that is not shipped), and the machine
+  has 2.4 GiB free disk against a multi-GB build. The order-preserving byte codec it will need *was*
+  built and tested, so the riskiest part is done. **D-18** records the gap and what it costs: the trait
+  freeze is validated by one implementation, not two.
+- **Power-loss testing**, and the literal ack-before-fsync mutation. Needs a filesystem fault injector
+  or a VM.
+- **A real-kill subprocess test.**
+- **Log segment rotation and trimming.** The C6 trim step is a no-op in v1: one segment, and recovery
+  replays only the suffix after the checkpoint's epoch, so trimming would save disk and change no
+  behaviour. The seam exists and is exercised so the ordering is right; the work is C7's compaction.
+- **No performance claim.** Nothing is benchmarked; the engine-constant ledger is still empty.
+
+### What C5 needs
+
+- **The plan type is already shared** (`current-plan`, D-14), which is what I-6 will be checked
+  against: SQL text and the typed API must produce the same `current_plan::Query`.
+- **Q-3 is the only open question left**, and C5 must settle it: grand-total aggregation over an empty
+  input (S-33). Doc first.
+- **The gate infrastructure is ready.** `sweep_matching` takes a predicate, so a SQL door adds a second
+  `EngineUnderTest` rather than a second harness.
+- **`EpochDeltas` can now move to `current-log`**, where §5.4 puts it. It has lived in `current-zset`
+  since C1 only because the log did not exist.
+
+Per the sprint protocol in `CLAUDE.md`, **C5 does not begin in the session that finished C4.**

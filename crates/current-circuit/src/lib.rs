@@ -28,10 +28,12 @@
 //! is C5. No durability: the result store is in memory, and C4 brings checkpoints. No sharing
 //! between circuits: that is the memo, C6. No join and no aggregate: C2 and C3.
 
+pub mod checkpoint;
 pub mod circuit;
 pub mod error;
 pub mod result_store;
 
+pub use checkpoint::{load as load_checkpoint, take as take_checkpoint};
 pub use circuit::{Circuit, CircuitBuilder, Epoch, NodeId};
 pub use error::{CircuitError, Result};
 pub use result_store::ResultStore;

@@ -231,6 +231,42 @@ same ground.
 **What changes in the plan.** `Query` gains a `distinct: bool`, applied after the projection. That is
 a widening of the plan IR both doors will share (D-14), so it is recorded rather than slipped in.
 
+### D-18 · `StateBackend` is frozen, and `RocksBackend` is **not delivered**
+
+*Sprint: C4. Preserves: I-9, D-5. Freezes the trait §5.5 says to freeze at C4's exit.*
+
+**The freeze.** `StateBackend` is now: `write(&WriteBatch)`, `scan_prefix`, `get`, `len`, `iter_all`,
+`snapshot`, `restore`. C4 added the last two — the "named snapshots" D-15 deliberately left out until
+the checkpoint protocol was designed — and adds nothing further.
+
+**The compatibility promise.** From here, a new backend can be written against this trait without any
+operator changing, and the trait will not gain a required method. If a later sprint needs one it
+arrives with a default implementation, or as a separate trait an operator may opt into. Concretely,
+`RocksBackend` and any custom LSM (D-5) can be added by implementing seven methods.
+
+Two things the freeze deliberately does *not* promise: that `snapshot` bytes are stable across
+versions (they are a checkpoint format, and C7's compaction will revisit it), and that entries are a
+proxy for memory — `len` counts entries, not bytes, and C8's `EXPLAIN STATE` is what will measure
+real memory.
+
+**`RocksBackend` is not delivered, and the freeze is weaker for it.** §6 C4's build list names it and
+D-5 mandates it. It could not be built in this environment, for two independent reasons:
+
+1. `librocksdb-sys` runs `bindgen`, which needs `libclang`. The Command Line Tools ship
+   `libclang.dylib` but the build script is *linked* against `@rpath/libclang.dylib`, so neither
+   `LIBCLANG_PATH` nor `DYLD_FALLBACK_LIBRARY_PATH` resolves it; the `bindgen-static` feature needs
+   `libclang.a`, which is not shipped at all.
+2. The machine has 2.4 GiB of free disk. A librocksdb-sys build needs several.
+
+What that costs, stated rather than glossed: **the freeze is validated by one implementation, not
+two.** The whole point of freezing a trait at C4 is that a second backend can then slot in without
+touching operators, and that claim is now argued from the interface rather than demonstrated by a
+second implementation. The order-preserving byte codec `RocksBackend` will need
+(`current_state::codec`) *was* built and is tested — byte order equals value order over a seeded
+sweep — so the piece most likely to be got wrong is done. But `RocksBackend` itself is outstanding
+work, it is named in `docs/PROGRESS.md` as such, and C4's gate does not depend on it: every I-4 and
+I-7 claim is proven over `MemBackend` plus real checkpoint files on a real filesystem.
+
 ---
 
 ## Open questions

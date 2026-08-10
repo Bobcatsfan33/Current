@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use current_zset::Value;
 
 use crate::backend::{Key, StateBackend, WriteBatch};
+use crate::codec::{decode_entries, encode_entries};
 use crate::error::{Result, StateError};
 
 #[derive(Debug, Clone, Default)]
@@ -78,6 +79,16 @@ impl StateBackend for MemBackend {
             .map(|(key, weight)| (key.clone(), *weight))
             .collect())
     }
+
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        Ok(encode_entries(&self.iter_all()?))
+    }
+
+    fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        let entries = decode_entries(bytes)?;
+        self.entries = entries.into_iter().collect();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +96,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
     use super::*;
+    use current_zset::Value;
 
     fn key(values: &[i64]) -> Key {
         values.iter().map(|v| Value::Int(*v)).collect()
@@ -195,6 +207,26 @@ mod tests {
             "the earlier addition in the failed batch must not have landed"
         );
         assert_eq!(backend.get(&key(&[1])).unwrap(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn a_snapshot_restores_to_an_identical_backend() {
+        let mut backend = MemBackend::new();
+        let mut batch = WriteBatch::new();
+        batch.add(key(&[1, 10]), 2);
+        batch.add(vec![Value::Null, Value::Str("x".into())], -3);
+        backend.write(&batch).unwrap();
+
+        let bytes = backend.snapshot().unwrap();
+        let mut restored = MemBackend::new();
+        // Put something in it first: restore must REPLACE, not merge.
+        let mut noise = WriteBatch::new();
+        noise.add(key(&[99]), 1);
+        restored.write(&noise).unwrap();
+
+        restored.restore(&bytes).unwrap();
+        assert_eq!(restored.iter_all().unwrap(), backend.iter_all().unwrap());
+        assert_eq!(restored.get(&key(&[99])).unwrap(), None, "restore replaces");
     }
 
     #[test]

@@ -66,6 +66,8 @@ jobs:
         run: cargo test -p current-differential --locked --test c2_join -- --nocapture
       - name: The C3 differential gate (aggregates, distinct, and the whole population)
         run: cargo test -p current-differential --locked --test c3_aggregate -- --nocapture
+      - name: The C4 crash gate (10,000 crash-and-recover cycles)
+        run: cargo test -p current-crash --locked --test c4_crash_gate -- --nocapture
 
   no-network:
     name: no-network

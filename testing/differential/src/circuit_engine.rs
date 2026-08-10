@@ -58,6 +58,16 @@ impl CircuitEngine {
     pub fn circuit(&self) -> &Circuit {
         &self.circuit
     }
+
+    /// Take the circuit out, for a caller that needs to drive it directly.
+    ///
+    /// C4's durable runtime builds a circuit of the right shape through this adapter — reusing the
+    /// binder and the wiring rather than duplicating them — and then owns it, because recovery has to
+    /// restore state into it and step it from the log rather than from a scenario.
+    #[must_use]
+    pub fn into_circuit(self) -> Circuit {
+        self.circuit
+    }
 }
 
 /// Build the circuit for a source, returning its sink node and the schema it emits.

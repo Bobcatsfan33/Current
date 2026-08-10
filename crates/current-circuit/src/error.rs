@@ -81,6 +81,15 @@ pub enum CircuitError {
     #[error("internal: the live-error store holds an entry that is not a message")]
     CorruptErrorStore,
 
+    #[error("injected fault at seam {0}")]
+    InjectedFault(&'static str),
+
+    #[error("a checkpoint snapshot is malformed or does not match this circuit's shape")]
+    CorruptSnapshot,
+
+    #[error("snapshot failure: {0}")]
+    Snapshot(String),
+
     /// The query has no answer because live errors are present (S-22).
     ///
     /// Displays as the message alone, with nothing added, so that it is byte-identical to the

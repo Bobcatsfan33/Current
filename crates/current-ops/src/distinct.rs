@@ -106,6 +106,15 @@ impl Operator for Distinct {
         StepOutput::infallible(ZSetBatch::from_entries(self.schema.clone(), out)?)
     }
 
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        Ok(self.state.snapshot()?)
+    }
+
+    fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        self.state.restore(bytes)?;
+        Ok(())
+    }
+
     fn render_state(&self) -> Result<String> {
         let mut out = String::new();
         for (key, weight) in self.state.iter_all()? {

@@ -155,6 +155,20 @@ pub trait Operator: fmt::Debug + Send {
     fn render_state(&self) -> Result<String> {
         Ok(String::new())
     }
+
+    /// Serialise whatever this operator remembers, for a checkpoint (`docs/DURABILITY.md` C1).
+    ///
+    /// The default is empty, which is correct for a stateless operator and is why filter and project
+    /// need no code here. A stateful one must round-trip: `restore(snapshot())` has to give an
+    /// operator that behaves identically, because I-7's claim is byte-identical recovery.
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    /// Replace this operator's state with a snapshot. Replace, not merge (see `StateBackend`).
+    fn restore(&mut self, _bytes: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Fetch the single input of a unary operator, or report the arity mismatch.

@@ -135,6 +135,16 @@ impl Join {
     }
 }
 
+/// Split a length-prefixed block off the front, returning it and the remainder.
+fn split_prefixed(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
+    let mut len_raw = [0u8; 4];
+    len_raw.copy_from_slice(bytes.get(0..4).ok_or(OpError::CorruptJoinIndex)?);
+    let len = u32::from_be_bytes(len_raw) as usize;
+    let block = bytes.get(4..4 + len).ok_or(OpError::CorruptJoinIndex)?;
+    let rest = bytes.get(4 + len..).ok_or(OpError::CorruptJoinIndex)?;
+    Ok((block, rest))
+}
+
 /// The key values of a row, or `None` if any of them is null.
 ///
 /// A row with a null key joins nothing: `NULL = NULL` is `NULL`, not `true`, so no comparison in
@@ -214,6 +224,25 @@ impl Operator for Join {
     /// is a function of the data alone (I-2).
     fn render_state(&self) -> Result<String> {
         self.render_indexes()
+    }
+
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        let left = self.left_index.snapshot()?;
+        let right = self.right_index.snapshot()?;
+        let mut out = Vec::with_capacity(left.len() + right.len() + 8);
+        out.extend_from_slice(&(left.len() as u32).to_be_bytes());
+        out.extend_from_slice(&left);
+        out.extend_from_slice(&(right.len() as u32).to_be_bytes());
+        out.extend_from_slice(&right);
+        Ok(out)
+    }
+
+    fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        let (left, rest) = split_prefixed(bytes)?;
+        let (right, _) = split_prefixed(rest)?;
+        self.left_index.restore(left)?;
+        self.right_index.restore(right)?;
+        Ok(())
     }
 
     /// `ΔOut = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB`, three probes, no shortcuts (D-3, §5.3).

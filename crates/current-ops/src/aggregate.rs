@@ -378,6 +378,15 @@ impl Operator for Aggregate {
     }
 
     /// The state, in key order — deterministic, so two identical runs fingerprint identically (I-2).
+    fn snapshot(&self) -> Result<Vec<u8>> {
+        Ok(self.state.snapshot()?)
+    }
+
+    fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        self.state.restore(bytes)?;
+        Ok(())
+    }
+
     fn render_state(&self) -> Result<String> {
         let mut out = String::new();
         for (key, weight) in self.state.iter_all()? {

@@ -24,9 +24,11 @@
 //! worse than leaving a gap that is labelled.
 
 pub mod backend;
+pub mod codec;
 pub mod error;
 pub mod mem;
 
 pub use backend::{Key, StateBackend, WriteBatch};
+pub use codec::{decode_entries, decode_key, encode_entries, encode_key};
 pub use error::{Result, StateError};
 pub use mem::MemBackend;
