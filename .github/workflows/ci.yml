@@ -55,10 +55,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --locked
-      # The differential gate is the one that matters; run it again alone so that its result is
-      # legible in the job log rather than buried among the unit tests.
-      - name: The C0 differential gate (1,000 oracle-vs-oracle scenarios)
+      # The differential gates are the ones that matter; run them again alone so their numbers
+      # are legible in the job log rather than buried among the unit tests. A green tick that
+      # does not say how many scenarios ran is not evidence of much.
+      - name: The C0 differential gate (oracle vs oracle — proves the harness)
         run: cargo test -p current-differential --locked --test oracle_vs_oracle -- --nocapture
+      - name: The C1 differential gate (engine vs oracle — proves I-1)
+        run: cargo test -p current-differential --locked --test c1_engine_vs_oracle -- --nocapture
 
   no-network:
     name: no-network
