@@ -1,5 +1,7 @@
 # Current
 
+[![CI](https://github.com/Bobcatsfan33/Current/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Bobcatsfan33/Current/actions/workflows/ci.yml)
+
 **The incremental-first query engine.** Every major database of the last two decades —
 ClickHouse, Snowflake, Elasticsearch, MongoDB, Postgres — shares one assumption: a query is a
 one-shot program. You ask; the engine reads the data, computes the answer, returns it, and

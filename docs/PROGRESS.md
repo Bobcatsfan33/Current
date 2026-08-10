@@ -22,7 +22,7 @@ exists.* That is what happened: there is no engine in this repository, deliberat
 
 | Gate condition | Proven by | Result |
 | --- | --- | --- |
-| CI green (fmt, clippy `-D warnings`, test, no-network) | `.github/workflows/ci.yml` | 4 jobs green |
+| CI green (fmt, clippy `-D warnings`, test, no-network) | `.github/workflows/ci.yml` | all green, plus the aggregate `ci` check — 5 jobs |
 | Harness runs oracle-vs-oracle over 1,000 randomized scenarios | `oracle_vs_oracle_over_one_thousand_randomized_scenarios` | 1,000 scenarios, 4,668 epochs, 5,668 answer comparisons, 0 divergences |
 | Property tests for Z-set algebra pass | `crates/current-zset/tests/properties.rs` | 13 property tests |
 | A seeded scenario is reproducible byte-for-byte from its seed | `a_seed_reproduces_its_scenario_byte_for_byte`, `a_seed_reproduces_its_run_byte_for_byte` | byte-identical scenario *and* run |
