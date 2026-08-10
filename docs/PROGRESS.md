@@ -144,9 +144,14 @@ moved first and the code followed, which is the order §10 requires.
 C1 is *linear operators + the first real circuit*. Everything it needs from C0 exists:
 
 - **The seam.** `EngineUnderTest` in `testing/differential/src/engine.rs` is what `current-circuit`
-  implements. Nothing in the harness mentions the oracle's types; `EpochInput` is the harness's
-  own. Add an adapter, put it on one side of `compare`, and the 1,000-scenario gate becomes a real
-  engine-vs-oracle gate — that is the C1 exit gate, and it costs one file.
+  implements. Add an adapter, put it on one side of `compare`, and the 1,000-scenario gate becomes
+  a real engine-vs-oracle gate — that is the C1 exit gate.
+
+  *Correction, made in C1:* this section originally claimed "nothing in the harness mentions the
+  oracle's types". That was false — the trait imported `current_oracle::Query`, and a comment in
+  `engine.rs` asserted the opposite of what the file did. It cost C1 a preparatory refactor
+  (D-14) rather than "one file". The claim is true now because the types moved to a neutral
+  crate, not because the wording was softened.
 - **The scenarios.** The generator already emits retractions, multiplicities, churn, updates, and
   empty epochs across four query families. C1's gate ("randomized filter/project scenarios
   including retractions") is a filter over `Family::FilterProject`, not new generator work.

@@ -23,66 +23,16 @@
 
 use std::collections::BTreeMap;
 
-use current_zset::{Canonical, Row, Schema, Value, ZSetBatch};
+use current_plan::bind::{bind, Catalog};
+use current_plan::eval::{eval, is_true};
+use current_plan::plan::{Query, Source};
+use current_zset::{Canonical, EpochDeltas, Row, Schema, Value, ZSetBatch};
 
 use crate::aggregate;
-use crate::bind::{bind, Catalog};
 use crate::error::{OracleError, Result};
-use crate::eval::{eval, is_true};
-use crate::plan::{Query, Source};
 
 /// Epochs are dense integers starting at 1 (S-6). Epoch 0 means "nothing has been sealed".
 pub type Epoch = u64;
-
-/// The input deltas of one epoch: a Z-set per table, as `(row, weight)` entries.
-///
-/// Entries are *not* consolidated on the way in. A delta may legitimately contain `(r, +1)` and
-/// `(r, -1)` — the same-epoch retract-and-reinsert that §7 requires the generator to produce —
-/// and flattening that at the door would hide it from everything downstream.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct EpochDeltas {
-    tables: BTreeMap<String, Vec<(Row, i64)>>,
-}
-
-impl EpochDeltas {
-    #[must_use]
-    pub fn new() -> EpochDeltas {
-        EpochDeltas::default()
-    }
-
-    /// Append one entry. A negative weight is a retraction and needs no special call (I-5).
-    pub fn push(&mut self, table: impl Into<String>, row: Row, weight: i64) {
-        self.tables
-            .entry(table.into())
-            .or_default()
-            .push((row, weight));
-    }
-
-    pub fn extend(
-        &mut self,
-        table: impl Into<String>,
-        entries: impl IntoIterator<Item = (Row, i64)>,
-    ) {
-        self.tables.entry(table.into()).or_default().extend(entries);
-    }
-
-    #[must_use]
-    pub fn tables(&self) -> &BTreeMap<String, Vec<(Row, i64)>> {
-        &self.tables
-    }
-
-    #[must_use]
-    pub fn entries_for(&self, table: &str) -> &[(Row, i64)] {
-        self.tables.get(table).map_or(&[], Vec::as_slice)
-    }
-
-    /// True if this epoch carries no changes at all. Empty epochs are legal and the generator
-    /// produces them deliberately (§7): the answer must not move.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.tables.values().all(Vec::is_empty)
-    }
-}
 
 /// A relation in flight: a schema and its entries. Not public — the oracle's intermediate stages
 /// are an implementation detail, and the only thing anyone outside sees is the answer.
@@ -141,7 +91,7 @@ impl Oracle {
             let schema = self
                 .catalog
                 .get(table)
-                .ok_or_else(|| OracleError::UnknownTable(table.clone()))?;
+                .ok_or_else(|| OracleError::unknown_table(table.clone()))?;
             for (row, _) in entries {
                 if row.len() != schema.len() {
                     return Err(OracleError::ZSet(current_zset::ZSetError::ArityMismatch {
@@ -171,7 +121,7 @@ impl Oracle {
     /// the log prefix `1..=epoch` (S-6).
     pub fn contents_at(&self, table: &str, epoch: Epoch) -> Result<Vec<(Row, i64)>> {
         if !self.catalog.contains_key(table) {
-            return Err(OracleError::UnknownTable(table.to_owned()));
+            return Err(OracleError::unknown_table(table));
         }
         if epoch > self.sealed_epoch() {
             return Err(OracleError::EpochOutOfRange {
@@ -221,7 +171,7 @@ impl Oracle {
         let schema = self
             .catalog
             .get(table)
-            .ok_or_else(|| OracleError::UnknownTable(table.to_owned()))?;
+            .ok_or_else(|| OracleError::unknown_table(table))?;
         Ok(ZSetBatch::from_entries(
             schema.clone(),
             self.contents_at(table, epoch)?,
@@ -320,7 +270,7 @@ impl Oracle {
                 let schema = self
                     .catalog
                     .get(table)
-                    .ok_or_else(|| OracleError::UnknownTable(table.clone()))?;
+                    .ok_or_else(|| OracleError::unknown_table(table.clone()))?;
                 let qualified = Schema::new(
                     schema
                         .fields()
@@ -346,27 +296,27 @@ impl Oracle {
             // weights, which is what makes multiplicities multiply.
             Source::Join { left, right, on } => {
                 if on.is_empty() {
-                    return Err(OracleError::CrossJoinNotSupported);
+                    return Err(OracleError::Plan(
+                        current_plan::PlanError::CrossJoinNotSupported,
+                    ));
                 }
                 let l = self.eval_source(left, epoch)?;
                 let r = self.eval_source(right, epoch)?;
 
                 let mut key_indexes = Vec::with_capacity(on.len());
                 for (lname, rname) in on {
-                    let li =
-                        l.schema
-                            .index_of(lname)
-                            .ok_or_else(|| OracleError::UnknownColumn {
-                                name: lname.clone(),
-                                scope: l.schema.to_string(),
-                            })?;
-                    let ri =
-                        r.schema
-                            .index_of(rname)
-                            .ok_or_else(|| OracleError::UnknownColumn {
-                                name: rname.clone(),
-                                scope: r.schema.to_string(),
-                            })?;
+                    let li = l.schema.index_of(lname).ok_or_else(|| {
+                        OracleError::Plan(current_plan::PlanError::UnknownColumn {
+                            name: lname.clone(),
+                            scope: l.schema.to_string(),
+                        })
+                    })?;
+                    let ri = r.schema.index_of(rname).ok_or_else(|| {
+                        OracleError::Plan(current_plan::PlanError::UnknownColumn {
+                            name: rname.clone(),
+                            scope: r.schema.to_string(),
+                        })
+                    })?;
                     key_indexes.push((li, ri));
                 }
 
@@ -393,7 +343,7 @@ impl Oracle {
 
     fn eval_group_by(
         &self,
-        group_by: &crate::plan::GroupBy,
+        group_by: &current_plan::plan::GroupBy,
         input: &Relation,
         output_schema: &Schema,
     ) -> Result<Relation> {
@@ -422,9 +372,9 @@ impl Oracle {
             // than emitting a row of zeroes (S-29).
             let mut total: i64 = 0;
             for (_, weight) in &members {
-                total = total
-                    .checked_add(*weight)
-                    .ok_or(OracleError::AggregateOverflow { func: "GROUP BY" })?;
+                total = total.checked_add(*weight).ok_or(OracleError::Plan(
+                    current_plan::PlanError::AggregateOverflow { func: "GROUP BY" },
+                ))?;
             }
             if total <= 0 {
                 continue;

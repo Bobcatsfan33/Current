@@ -29,11 +29,10 @@
 
 use std::collections::BTreeMap;
 
-use current_oracle::bind::{bind, bind_source, Catalog};
-use current_oracle::plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};
-use current_zset::{DataType, Field, Row, Schema, Value};
+use current_plan::bind::{bind, bind_source, Catalog};
+use current_plan::plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};
+use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
-use crate::engine::EpochInput;
 use crate::rng::Rng;
 
 /// One generated scenario: everything two implementations need to be compared.
@@ -42,7 +41,7 @@ pub struct Scenario {
     pub seed: u64,
     pub tables: Vec<(String, Schema)>,
     pub query: Query,
-    pub epochs: Vec<EpochInput>,
+    pub epochs: Vec<EpochDeltas>,
     /// Which shape the query has, for reporting and for coverage checks.
     pub family: Family,
 }
@@ -204,13 +203,13 @@ impl Scenario {
     /// True if no epoch carries any change: the empty-input case (§7).
     #[must_use]
     pub fn is_empty_input(&self) -> bool {
-        self.epochs.iter().all(EpochInput::is_empty)
+        self.epochs.iter().all(EpochDeltas::is_empty)
     }
 
     /// True if at least one epoch is empty while others are not (§7).
     #[must_use]
     pub fn has_empty_epoch(&self) -> bool {
-        self.epochs.iter().any(EpochInput::is_empty)
+        self.epochs.iter().any(EpochDeltas::is_empty)
     }
 
     /// A complete, deterministic rendering of the scenario.
@@ -318,11 +317,11 @@ fn generate_row(rng: &mut Rng, schema: &Schema) -> Row {
 
 /// Build the epoch sequence, maintaining a model of each table's contents so that no retraction
 /// ever removes something that is not there (S-5).
-fn generate_epochs(rng: &mut Rng, tables: &[(String, Schema)]) -> Vec<EpochInput> {
+fn generate_epochs(rng: &mut Rng, tables: &[(String, Schema)]) -> Vec<EpochDeltas> {
     // One scenario in eight has no data at all: the empty-input case (§7).
     if rng.chance(1, 8) {
         let count = rng.below(3) + 1;
-        return (0..count).map(|_| EpochInput::new()).collect();
+        return (0..count).map(|_| EpochDeltas::new()).collect();
     }
 
     let mut model: BTreeMap<String, BTreeMap<Row, i64>> = tables
@@ -334,7 +333,7 @@ fn generate_epochs(rng: &mut Rng, tables: &[(String, Schema)]) -> Vec<EpochInput
     let mut epochs = Vec::with_capacity(epoch_count as usize);
 
     for _ in 0..epoch_count {
-        let mut input = EpochInput::new();
+        let mut input = EpochDeltas::new();
         // One epoch in six is empty: the answer must not move (§7).
         if !rng.chance(1, 6) {
             for (name, schema) in tables {
@@ -358,7 +357,7 @@ fn generate_operation(
     table: &str,
     schema: &Schema,
     contents: &mut BTreeMap<Row, i64>,
-    input: &mut EpochInput,
+    input: &mut EpochDeltas,
 ) {
     let present: Vec<(Row, i64)> = contents.iter().map(|(r, w)| (r.clone(), *w)).collect();
 
@@ -433,7 +432,7 @@ fn generate_operation(
 
 fn apply(
     contents: &mut BTreeMap<Row, i64>,
-    input: &mut EpochInput,
+    input: &mut EpochDeltas,
     table: &str,
     row: Row,
     weight: i64,

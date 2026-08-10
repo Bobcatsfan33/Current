@@ -9,11 +9,12 @@
 //!    and non-negative; a negative weight would be an oracle bug, and the caller reports it as
 //!    one rather than quietly folding it in.
 
+use current_plan::eval::eval;
+use current_plan::plan::AggFunc;
+use current_plan::PlanError;
 use current_zset::{Row, Schema, Value};
 
 use crate::error::{OracleError, Result};
-use crate::eval::eval;
-use crate::plan::AggFunc;
 
 /// Evaluate one aggregate over the members of a group.
 ///
@@ -25,9 +26,9 @@ pub fn evaluate(func: &AggFunc, members: &[(Row, i64)], scope: &Schema) -> Resul
         AggFunc::CountStar => {
             let mut total: i64 = 0;
             for (_, weight) in members {
-                total = total
-                    .checked_add(*weight)
-                    .ok_or(OracleError::AggregateOverflow { func: name })?;
+                total = total.checked_add(*weight).ok_or(OracleError::Plan(
+                    PlanError::AggregateOverflow { func: name },
+                ))?;
             }
             Ok(Value::Int(total))
         }
@@ -38,9 +39,9 @@ pub fn evaluate(func: &AggFunc, members: &[(Row, i64)], scope: &Schema) -> Resul
             let mut total: i64 = 0;
             for (row, weight) in members {
                 if !eval(arg, row, scope)?.is_null() {
-                    total = total
-                        .checked_add(*weight)
-                        .ok_or(OracleError::AggregateOverflow { func: name })?;
+                    total = total.checked_add(*weight).ok_or(OracleError::Plan(
+                        PlanError::AggregateOverflow { func: name },
+                    ))?;
                 }
             }
             Ok(Value::Int(total))
@@ -75,7 +76,7 @@ pub fn evaluate(func: &AggFunc, members: &[(Row, i64)], scope: &Schema) -> Resul
 /// still land inside `Int64` — the wider accumulator means such a sum is correct rather than a
 /// spurious overflow, and the final narrowing to `Int64` is checked (S-30, D-11).
 fn sum_and_count(
-    arg: &crate::plan::Expr,
+    arg: &current_plan::plan::Expr,
     members: &[(Row, i64)],
     scope: &Schema,
     func: &'static str,
@@ -91,28 +92,29 @@ fn sum_and_count(
             Value::Int(x) => x,
             // Unreachable after binding, which proves SUM/AVG arguments are Int64 (S-30).
             other => {
-                return Err(OracleError::AggregateTypeUnsupported {
+                return Err(OracleError::Plan(PlanError::AggregateTypeUnsupported {
                     func,
                     ty: other.data_type().unwrap_or(current_zset::DataType::Int64),
-                })
+                }))
             }
         };
         any = true;
         let term = i128::from(*weight)
             .checked_mul(i128::from(x))
-            .ok_or(OracleError::AggregateOverflow { func })?;
+            .ok_or(OracleError::Plan(PlanError::AggregateOverflow { func }))?;
         sum = sum
             .checked_add(term)
-            .ok_or(OracleError::AggregateOverflow { func })?;
+            .ok_or(OracleError::Plan(PlanError::AggregateOverflow { func }))?;
         count = count
             .checked_add(*weight)
-            .ok_or(OracleError::AggregateOverflow { func })?;
+            .ok_or(OracleError::Plan(PlanError::AggregateOverflow { func }))?;
     }
 
     if !any {
         return Ok(None);
     }
-    let sum = i64::try_from(sum).map_err(|_| OracleError::AggregateOverflow { func })?;
+    let sum =
+        i64::try_from(sum).map_err(|_| OracleError::Plan(PlanError::AggregateOverflow { func }))?;
     Ok(Some((sum, count)))
 }
 
@@ -129,7 +131,7 @@ enum Extremum {
 /// Group members are consolidated and non-negative, so that condition is "the row is here at
 /// all", which is why this function does not inspect the sign of a weight either.
 fn extremum(
-    arg: &crate::plan::Expr,
+    arg: &current_plan::plan::Expr,
     members: &[(Row, i64)],
     scope: &Schema,
     which: Extremum,
@@ -171,7 +173,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
     use super::*;
-    use crate::plan::Expr;
+    use current_plan::plan::Expr;
     use current_zset::{DataType, Field};
 
     fn scope() -> Schema {
@@ -294,7 +296,7 @@ mod tests {
         let members = [member(Some(i64::MAX), None, 2)];
         assert_eq!(
             agg(AggFunc::Sum(x()), &members).unwrap_err(),
-            OracleError::AggregateOverflow { func: "SUM" }
+            OracleError::Plan(PlanError::AggregateOverflow { func: "SUM" })
         );
     }
 

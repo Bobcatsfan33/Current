@@ -67,6 +67,68 @@ fixes one rule — nulls before all non-null values — and provides no modifier
 for two implementations to disagree about. Strings order byte-wise over their UTF-8 encoding, with
 no collation support in v1.
 
+### D-14 · A neutral `current-plan` crate holds the logical plan, the binder, and the scalar expression library
+
+*A deviation from the §5 crate map, recorded before the code moved.*
+
+*Sprint: C1 (pre-work). Preserves: I-1, I-6. Supersedes: nothing in §4; **extends the crate map in
+`ARCHITECTURE.md` §5**.*
+
+**What changes.** A new crate `crates/current-plan/` is added to the workspace, holding three
+things that were in `current-oracle`:
+
+- the **logical plan IR** — `Query`, `Source`, `Expr`, `BinOp`, `AggFunc`, `GroupBy`, `Named`;
+- the **binder** — scope rules, type checking, and the named refusals (S-10, S-12, S-19, S-27);
+- the **scalar expression library** — three-valued evaluation (S-13…S-22).
+
+`current-zset` additionally gains `EpochDeltas`, the per-table bundle of input deltas, replacing
+two private copies (one in `current-oracle`, one in the differential harness).
+
+**Why the crate map needed extending.** §5 lists ten crates and none of them is a home for a
+logical plan that *both* the oracle and the engine can read. From C1 there are two implementations
+of the query surface, and every option other than a neutral crate is worse:
+
+- `current-circuit` depending on `current-oracle` inverts the relationship the oracle exists to
+  have. The oracle is the arbiter (§5.1); an engine that imports it can inherit its bugs, and I-1
+  stops being a comparison between two things.
+- Duplicating the plan IR in the engine means two spellings of one query shape, which must then be
+  kept in step by hand. I-6 ("SQL and the typed API compile to the same circuit plan") is a claim
+  about there being *one* plan type; two would make it unprovable.
+- Putting the plan in `current-zset` breaks that crate's cohesion. It is the data layer — "Z-set
+  batches over Arrow; weight algebra; consolidation" — and a query IR is not data.
+
+`EpochDeltas` goes to `current-zset` for the opposite reason: it *is* data, it is the delta
+representation named in §1, and every crate already depends on that crate. `current-log` (§5.4) is
+its eventual home for the *write path*, but that is C4 and the type is needed now.
+
+**Why the binder moves with the plan.** The scoping rules (S-10 qualified before a GROUP BY,
+S-27 unqualified after it) and the output-schema rules (S-11) decide what a query's answer schema
+*is*. Schema equality is part of answer equality (S-8), so if the engine derived schemas by its
+own second implementation of those rules, the two could disagree and every disagreement would
+surface as a spurious I-1 failure. One binder, one answer schema.
+
+**Why the scalar library moves with it, and what that costs.** §6 C5 already specifies the end
+state: "scalar expression library … **implemented once, shared by oracle and engine** but *tested
+differentially anyway* (shared code can still be called differently)." C1's filter and project
+operators need expression evaluation now, so the choice is to share the library one sprint early
+or to write a second one and delete it in C5.
+
+The cost is real and is stated rather than glossed: **a bug inside shared code produces the same
+wrong answer on both sides, and the differential harness cannot see it.** Three things bound that
+risk, and none of them is "we were careful":
+
+1. `current-plan` carries the S-rule unit tests that were in the oracle — the Kleene truth tables,
+   checked arithmetic, CASE short-circuiting, null comparison. They pin the library against
+   `docs/SEMANTICS.md` directly, not against another implementation.
+2. What C1 is actually hunting is *incrementality* bugs — maintaining an answer from deltas versus
+   recomputing it from scratch. That machinery is not shared, and the harness sees all of it.
+3. §6 C5's parenthesis is the standing warning: shared code can still be *called* differently, and
+   the harness does test that.
+
+**Where this lands in C5.** `current-sql` becomes "sqlparser AST → a SQL-specific binder →
+`current_plan::Query` → the incrementalizer". Both doors — SQL text and the typed API — produce
+the same `current_plan::Query`, which is what I-6 needs in order to be checkable at all.
+
 ---
 
 ## Open questions

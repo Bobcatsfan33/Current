@@ -10,7 +10,7 @@
 
 use current_zset::{Row, Schema, Value};
 
-use crate::error::{OracleError, Result};
+use crate::error::{PlanError, Result};
 use crate::plan::{BinOp, Expr};
 
 /// Evaluate `expr` against `row`, whose columns are described by `scope`.
@@ -23,13 +23,13 @@ pub fn eval(expr: &Expr, row: &Row, scope: &Schema) -> Result<Value> {
         Expr::Column(name) => {
             let index = scope
                 .index_of(name)
-                .ok_or_else(|| OracleError::UnknownColumn {
+                .ok_or_else(|| PlanError::UnknownColumn {
                     name: name.clone(),
                     scope: scope.to_string(),
                 })?;
             row.get(index)
                 .cloned()
-                .ok_or_else(|| OracleError::UnknownColumn {
+                .ok_or_else(|| PlanError::UnknownColumn {
                     name: name.clone(),
                     scope: scope.to_string(),
                 })
@@ -129,7 +129,7 @@ fn eval_binary(op: BinOp, l: &Value, r: &Value) -> Result<Value> {
                 // Unreachable after binding, which proves both sides are Int64 (S-19). Reported
                 // rather than assumed, because an oracle that assumes is not an oracle.
                 _ => {
-                    return Err(OracleError::TypeMismatch {
+                    return Err(PlanError::TypeMismatch {
                         op: op.name(),
                         left: l.data_type().unwrap_or(current_zset::DataType::Int64),
                         right: r.data_type().unwrap_or(current_zset::DataType::Int64),
@@ -151,7 +151,7 @@ fn eval_binary(op: BinOp, l: &Value, r: &Value) -> Result<Value> {
                 BinOp::Gt => ordering.is_gt(),
                 BinOp::Ge => ordering.is_ge(),
                 // Arithmetic operators are matched in the arm above.
-                _ => return Err(OracleError::ArithmeticOverflow { op: op.name() }),
+                _ => return Err(PlanError::ArithmeticOverflow { op: op.name() }),
             }))
         }
     }
@@ -159,21 +159,21 @@ fn eval_binary(op: BinOp, l: &Value, r: &Value) -> Result<Value> {
 
 /// Checked integer arithmetic (S-20, S-21). Nothing here wraps, saturates, or returns null.
 fn eval_arithmetic(op: BinOp, a: i64, b: i64) -> Result<i64> {
-    let overflow = || OracleError::ArithmeticOverflow { op: op.name() };
+    let overflow = || PlanError::ArithmeticOverflow { op: op.name() };
     match op {
         BinOp::Add => a.checked_add(b).ok_or_else(overflow),
         BinOp::Sub => a.checked_sub(b).ok_or_else(overflow),
         BinOp::Mul => a.checked_mul(b).ok_or_else(overflow),
         BinOp::Div => {
             if b == 0 {
-                return Err(OracleError::DivisionByZero { op: op.name() });
+                return Err(PlanError::DivisionByZero { op: op.name() });
             }
             // `checked_div` also catches i64::MIN / -1, which overflows (S-21).
             a.checked_div(b).ok_or_else(overflow)
         }
         BinOp::Mod => {
             if b == 0 {
-                return Err(OracleError::DivisionByZero { op: op.name() });
+                return Err(PlanError::DivisionByZero { op: op.name() });
             }
             a.checked_rem(b).ok_or_else(overflow)
         }
@@ -286,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             run(&e, &r).unwrap_err(),
-            OracleError::DivisionByZero { op: "/" }
+            PlanError::DivisionByZero { op: "/" }
         );
     }
 
@@ -367,7 +367,7 @@ mod tests {
         let e = Expr::binary(BinOp::Add, col("t.i"), Expr::int(1));
         assert_eq!(
             run(&e, &r).unwrap_err(),
-            OracleError::ArithmeticOverflow { op: "+" }
+            PlanError::ArithmeticOverflow { op: "+" }
         );
     }
 
@@ -376,21 +376,21 @@ mod tests {
         let r = row(Some(1), None, None);
         assert_eq!(
             run(&Expr::binary(BinOp::Div, col("t.i"), Expr::int(0)), &r).unwrap_err(),
-            OracleError::DivisionByZero { op: "/" }
+            PlanError::DivisionByZero { op: "/" }
         );
         assert_eq!(
             run(&Expr::binary(BinOp::Mod, col("t.i"), Expr::int(0)), &r).unwrap_err(),
-            OracleError::DivisionByZero { op: "%" }
+            PlanError::DivisionByZero { op: "%" }
         );
 
         let r = row(Some(i64::MIN), None, None);
         assert_eq!(
             run(&Expr::binary(BinOp::Div, col("t.i"), Expr::int(-1)), &r).unwrap_err(),
-            OracleError::ArithmeticOverflow { op: "/" }
+            PlanError::ArithmeticOverflow { op: "/" }
         );
         assert_eq!(
             run(&Expr::binary(BinOp::Mod, col("t.i"), Expr::int(-1)), &r).unwrap_err(),
-            OracleError::ArithmeticOverflow { op: "%" }
+            PlanError::ArithmeticOverflow { op: "%" }
         );
     }
 

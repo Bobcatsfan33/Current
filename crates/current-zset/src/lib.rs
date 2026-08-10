@@ -18,16 +18,20 @@
 //!   `consolidate`.
 //! - [`Canonical`] — the canonical form (S-8) that answer equality is defined on, and therefore
 //!   the thing the differential harness compares (I-1).
+//! - [`EpochDeltas`] — one epoch's input deltas, per table: the change that becomes visible when
+//!   an epoch is sealed (S-6).
 //!
 //! Semantics referenced as `S-n` are defined in `docs/SEMANTICS.md`, which is the spec; this
 //! crate implements it and does not decide it.
 
+mod deltas;
 mod error;
 mod row;
 mod schema;
 mod value;
 mod zset;
 
+pub use deltas::EpochDeltas;
 pub use error::{Result, ZSetError};
 pub use row::Row;
 pub use schema::{Field, Schema};

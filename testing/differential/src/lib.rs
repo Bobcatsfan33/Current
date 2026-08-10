@@ -43,13 +43,14 @@
 //! # }
 //! ```
 
+pub mod coverage;
 pub mod engine;
 pub mod harness;
 pub mod oracle_engine;
 pub mod rng;
 pub mod scenario;
 
-pub use engine::{EngineUnderTest, EpochInput};
+pub use engine::EngineUnderTest;
 pub use harness::{compare, sweep, Divergence, DivergenceKind, Report, SweepReport};
 pub use oracle_engine::{OracleEngine, SaboteurEngine};
 pub use rng::Rng;

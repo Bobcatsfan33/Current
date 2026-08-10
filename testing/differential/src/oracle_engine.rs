@@ -10,10 +10,11 @@
 //! the cheapest time to find out is before there is an engine to blame. From C1, one side becomes
 //! `current-circuit` and the comparison starts testing the engine instead (I-1).
 
-use current_oracle::{EpochDeltas, Oracle, Query};
-use current_zset::{Canonical, Schema};
+use current_oracle::Oracle;
+use current_plan::Query;
+use current_zset::{Canonical, EpochDeltas, Schema};
 
-use crate::engine::{EngineUnderTest, EpochInput};
+use crate::engine::EngineUnderTest;
 
 /// An [`EngineUnderTest`] backed by the naive reference engine.
 #[derive(Debug)]
@@ -35,12 +36,10 @@ impl EngineUnderTest for OracleEngine {
         })
     }
 
-    fn seal_epoch(&mut self, input: &EpochInput) -> Result<(), String> {
-        let mut deltas = EpochDeltas::new();
-        for (table, entries) in input.tables() {
-            deltas.extend(table.clone(), entries.iter().cloned());
-        }
-        self.oracle.seal_epoch(deltas).map_err(|e| e.to_string())?;
+    fn seal_epoch(&mut self, deltas: &EpochDeltas) -> Result<(), String> {
+        self.oracle
+            .seal_epoch(deltas.clone())
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -48,6 +47,17 @@ impl EngineUnderTest for OracleEngine {
         self.oracle
             .canonical_answer_at(&self.query, self.oracle.sealed_epoch())
             .map_err(|e| e.to_string())
+    }
+
+    /// The oracle holds no derived state — it replays the log on every question (§5.1) — so its
+    /// whole condition is its epoch and its answer. Saying exactly that is more honest than
+    /// inventing a state dump it does not have.
+    fn state_fingerprint(&self) -> Result<String, String> {
+        Ok(format!(
+            "oracle @ epoch {}\nno derived state (recomputes from the log prefix)\n{}",
+            self.oracle.sealed_epoch(),
+            self.answer()?.render()
+        ))
     }
 }
 
@@ -74,8 +84,8 @@ impl EngineUnderTest for SaboteurEngine {
         })
     }
 
-    fn seal_epoch(&mut self, input: &EpochInput) -> Result<(), String> {
-        self.inner.seal_epoch(input)
+    fn seal_epoch(&mut self, deltas: &EpochDeltas) -> Result<(), String> {
+        self.inner.seal_epoch(deltas)
     }
 
     fn answer(&self) -> Result<Canonical, String> {
@@ -85,5 +95,9 @@ impl EngineUnderTest for SaboteurEngine {
         current_zset::ZSetBatch::from_entries(truth.schema().clone(), entries)
             .and_then(|b| b.canonical())
             .map_err(|e| e.to_string())
+    }
+
+    fn state_fingerprint(&self) -> Result<String, String> {
+        Ok(format!("saboteur\n{}", self.answer()?.render()))
     }
 }

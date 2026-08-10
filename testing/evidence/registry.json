@@ -1,25 +1,131 @@
 {
   "$comment": [
     "THE LEDGER (ARCHITECTURE.md §1, I-10).",
-    "Every tuned constant in the engine, with the benchmark artifact that justifies it.",
+    "Every tuned constant, with the artifact that justifies it.",
     "A constant not in this ledger may not steer behavior.",
     "",
-    "It is empty because nothing is tuned yet. C0 built the oracle and the harness; there is no",
-    "engine, no cache, no batch size, no threshold, and no benchmark. The first entries arrive",
-    "when the first constant does — RocksDB block cache and bloom filters in C8, consolidate()",
-    "tuning in C10 — and each one arrives with its receipt or not at all.",
+    "Two sections, because there are two kinds of constant and only one of them is in the",
+    "engine:",
+    "",
+    "  constants           — constants in the ENGINE. Still empty: nothing is tuned yet. There",
+    "                        is no cache, no batch size, no threshold, and no benchmark. The",
+    "                        first entries arrive when the first constant does (RocksDB block",
+    "                        cache and bloom filters in C8, consolidate() tuning in C10), and",
+    "                        each arrives with its receipt or not at all.",
+    "",
+    "  generator_constants — constants in the SCENARIO GENERATOR. These do not steer the engine;",
+    "                        they steer what the test suite covers, which deserves a receipt at",
+    "                        least as much. An engine constant set badly makes the engine slow.",
+    "                        A generator constant set badly makes a green suite meaningless —",
+    "                        and it does so silently, because everything still passes.",
     "",
     "An entry has the shape:",
     "  {",
-    "    \"name\":       \"the constant, as it appears in code\",",
-    "    \"value\":       <the value>,",
-    "    \"location\":    \"crate/path.rs:line\",",
-    "    \"steers\":      \"what behaviour this changes\",",
-    "    \"artifact\":    \"testing/evidence/<benchmark>.json — committed, reproducible\",",
-    "    \"measured_on\": \"the machine and configuration the artifact was produced on\",",
-    "    \"sprint\":      \"CN\"",
+    "    \"name\":        \"the constant, as it appears in code\",",
+    "    \"value\":        <the value>,",
+    "    \"location\":     \"path.rs\",",
+    "    \"steers\":       \"what this changes\",",
+    "    \"justification\":\"why this value and not another, in terms of a measured number\",",
+    "    \"artifact\":     \"testing/evidence/<file> — committed, regenerable, checked by a test\",",
+    "    \"measured_on\":  \"the machine and configuration, or 'deterministic' when the",
+    "                     measurement is a pure function of its inputs and has no machine\",",
+    "    \"sprint\":       \"CN\"",
     "  }"
   ],
-  "schema_version": 1,
-  "constants": []
+  "schema_version": 2,
+
+  "constants": [],
+
+  "generator_constants": [
+    {
+      "name": "KEY_DOMAIN",
+      "value": [0, 2],
+      "location": "testing/differential/src/scenario.rs",
+      "steers": "The range of values in the `id` column, which is the column every generated join joins on.",
+      "justification": "The join-key domain sets how often two tables share a key at all. Measured at the committed artifact: of 387 join-family scenarios where both tables ended up populated, 266 produced a non-empty bare join. Before narrowing the domain the same measurement read 69 of 141 — under half — so most join scenarios were comparing two empty answers, which agree no matter how broken either side is. Three values is the smallest domain that still lets a null key, a matching key, and a non-matching key all occur.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "operation weighting",
+      "value": "3/8 insert, 1/8 duplicate, 2/8 retract, 1/8 update, 1/8 churn",
+      "location": "testing/differential/src/scenario.rs, generate_operation",
+      "steers": "Whether tables accumulate rows over a scenario or hover near empty.",
+      "justification": "With insertions and retractions balanced, a table stays near empty: joins find nothing, groups hold one row, and the suite spends its epochs comparing empty answers. Insertions outnumber retractions 3:2 so tables grow. Retractions remain a quarter of all operations outright, and update and churn carry negative weights too — measured at the artifact, 825 of 1,000 scenarios contain a retraction and 377 contain one in epoch one. The §6 C0 bar is that retractions are present from epoch one; this raises coverage without lowering that bar.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "operations per table per epoch",
+      "value": "1..=3",
+      "location": "testing/differential/src/scenario.rs, generate_epochs",
+      "steers": "How much each non-empty epoch changes.",
+      "justification": "The lower bound was 0, which allowed a scenario to seal eight epochs and still hold no data. A run over an empty table proves nothing about a join or an aggregate. At least one operation per table per non-empty epoch guarantees the scenario is about something.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "empty-epoch rate",
+      "value": "1/6",
+      "location": "testing/differential/src/scenario.rs, generate_epochs",
+      "steers": "How often a sealed epoch carries no changes at all.",
+      "justification": "§7 requires empty epochs: the answer must not move across one. Measured at the artifact, 650 of 1,000 scenarios contain at least one, which is ample for `an_empty_epoch_never_changes_the_answer` to have something to check in every family.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "empty-input rate",
+      "value": "1/8",
+      "location": "testing/differential/src/scenario.rs, generate_epochs",
+      "steers": "How often a whole scenario carries no data at all.",
+      "justification": "§7 requires empty inputs — an engine that is wrong on an empty input is wrong before it starts. Measured at the artifact, 136 of 1,000. Higher would waste the sweep on the least informative case; zero would drop a case §7 names.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "predicate depth and connective weighting",
+      "value": "depth 1 (depth 2 one time in four); OR twice as likely as AND, NOT least likely",
+      "location": "testing/differential/src/scenario.rs, generate_query and generate_predicate",
+      "steers": "How selective a generated WHERE clause is.",
+      "justification": "Each level of AND roughly halves the rows that survive, and a filter admitting nothing turns the scenario into an expensive way of comparing two empty answers. Nesting still occurs; it is not the default shape.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "comparison operator weighting",
+      "value": "equality weight 1, each inequality weight 2",
+      "location": "testing/differential/src/scenario.rs, generate_comparison",
+      "steers": "How many rows a generated comparison admits.",
+      "justification": "Over a domain of a handful of values, `= literal` admits roughly one row in six while `<= literal` admits about half. Equality is kept because joins and group keys need it, but weighting toward the inequalities keeps answers non-empty often enough to be worth comparing.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "typed-NULL comparison rate",
+      "value": "1/16",
+      "location": "testing/differential/src/scenario.rs, generate_comparison",
+      "steers": "How often a comparison is against a typed NULL, making the whole predicate NULL.",
+      "justification": "Comparing to NULL makes the predicate admit nothing (S-13), so as a top-level filter it empties the scenario. It is generated because 'neither matches nor complements' (S-17) is real behaviour worth covering, but rarely, because every occurrence costs a scenario.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    },
+    {
+      "name": "null rate in generated values",
+      "value": "1/4 for nullable columns",
+      "location": "testing/differential/src/scenario.rs, generate_value",
+      "steers": "How much three-valued logic the scenarios exercise.",
+      "justification": "Nulls are the common case in this dialect, not the exception (S-13…S-18): they change comparison, grouping, aggregation, and joins, each differently. A quarter is frequent enough that every null-sensitive rule is hit across a sweep, without making the data mostly absent.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C0"
+    }
+  ]
 }

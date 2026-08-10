@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use current_zset::{DataType, Field, Schema, Value};
 
-use crate::error::{OracleError, Result};
+use crate::error::{PlanError, Result};
 use crate::plan::{AggFunc, Expr, GroupBy, Named, Query, Source};
 
 /// Table name → schema.
@@ -45,23 +45,23 @@ impl<'a> Scope<'a> {
     pub fn resolve(&self, name: &str) -> Result<&'a Field> {
         match self.naming {
             Naming::Qualified if !name.contains('.') => {
-                return Err(OracleError::UnqualifiedColumn(name.to_owned()));
+                return Err(PlanError::UnqualifiedColumn(name.to_owned()));
             }
             Naming::Unqualified if name.contains('.') => {
-                return Err(OracleError::QualifiedColumnAfterGroupBy(name.to_owned()));
+                return Err(PlanError::QualifiedColumnAfterGroupBy(name.to_owned()));
             }
             _ => {}
         }
         let index = self
             .schema
             .index_of(name)
-            .ok_or_else(|| OracleError::UnknownColumn {
+            .ok_or_else(|| PlanError::UnknownColumn {
                 name: name.to_owned(),
                 scope: self.schema.to_string(),
             })?;
         self.schema
             .field(index)
-            .ok_or_else(|| OracleError::UnknownColumn {
+            .ok_or_else(|| PlanError::UnknownColumn {
                 name: name.to_owned(),
                 scope: self.schema.to_string(),
             })
@@ -137,7 +137,7 @@ pub fn bind_source(source: &Source, catalog: &Catalog) -> Result<Schema> {
         Source::Scan { table, alias } => {
             let schema = catalog
                 .get(table)
-                .ok_or_else(|| OracleError::UnknownTable(table.clone()))?;
+                .ok_or_else(|| PlanError::UnknownTable(table.clone()))?;
             let fields = schema
                 .fields()
                 .iter()
@@ -147,7 +147,7 @@ pub fn bind_source(source: &Source, catalog: &Catalog) -> Result<Schema> {
         }
         Source::Join { left, right, on } => {
             if on.is_empty() {
-                return Err(OracleError::CrossJoinNotSupported);
+                return Err(PlanError::CrossJoinNotSupported);
             }
             let left_schema = bind_source(left, catalog)?;
             let right_schema = bind_source(right, catalog)?;
@@ -161,7 +161,7 @@ pub fn bind_source(source: &Source, catalog: &Catalog) -> Result<Schema> {
                 let lf = left_scope.resolve(l)?;
                 let rf = right_scope.resolve(r)?;
                 if lf.data_type != rf.data_type {
-                    return Err(OracleError::TypeMismatch {
+                    return Err(PlanError::TypeMismatch {
                         op: "join key =",
                         left: lf.data_type,
                         right: rf.data_type,
@@ -180,7 +180,7 @@ fn check_aliases_unique(source: &Source) -> Result<()> {
     let aliases = source.aliases();
     for (i, alias) in aliases.iter().enumerate() {
         if aliases.get(..i).is_some_and(|prior| prior.contains(alias)) {
-            return Err(OracleError::DuplicateAlias((*alias).to_owned()));
+            return Err(PlanError::DuplicateAlias((*alias).to_owned()));
         }
     }
     Ok(())
@@ -188,7 +188,7 @@ fn check_aliases_unique(source: &Source) -> Result<()> {
 
 fn bind_group_by(group_by: &GroupBy, input: Scope<'_>) -> Result<Schema> {
     if group_by.keys.is_empty() {
-        return Err(OracleError::EmptyGroupKeys);
+        return Err(PlanError::EmptyGroupKeys);
     }
     let mut fields = Vec::with_capacity(group_by.keys.len() + group_by.aggregates.len());
     for key in &group_by.keys {
@@ -214,16 +214,16 @@ pub fn aggregate_result_type(func: &AggFunc, scope: Scope<'_>) -> Result<DataTyp
         }
         AggFunc::Sum(arg) => match type_of(arg, scope)? {
             DataType::Int64 => Ok(DataType::Int64),
-            ty => Err(OracleError::AggregateTypeUnsupported { func: name, ty }),
+            ty => Err(PlanError::AggregateTypeUnsupported { func: name, ty }),
         },
         AggFunc::Avg(arg) => match type_of(arg, scope)? {
             // The only source of a Float64 in the entire system (S-3, S-31).
             DataType::Int64 => Ok(DataType::Float64),
-            ty => Err(OracleError::AggregateTypeUnsupported { func: name, ty }),
+            ty => Err(PlanError::AggregateTypeUnsupported { func: name, ty }),
         },
         AggFunc::Min(arg) | AggFunc::Max(arg) => match type_of(arg, scope)? {
             ty @ (DataType::Int64 | DataType::Utf8 | DataType::Boolean) => Ok(ty),
-            ty => Err(OracleError::AggregateTypeUnsupported { func: name, ty }),
+            ty => Err(PlanError::AggregateTypeUnsupported { func: name, ty }),
         },
     }
 }
@@ -240,7 +240,7 @@ fn build_output_schema(fields: Vec<Field>) -> Result<Schema> {
             .get(..i)
             .is_some_and(|prior| prior.iter().any(|p| p.name == f.name))
         {
-            return Err(OracleError::DuplicateOutputName(f.name.clone()));
+            return Err(PlanError::DuplicateOutputName(f.name.clone()));
         }
     }
     Ok(Schema::new(fields)?)
@@ -249,7 +249,7 @@ fn build_output_schema(fields: Vec<Field>) -> Result<Schema> {
 fn expect_boolean(expr: &Expr, scope: Scope<'_>, context: &'static str) -> Result<()> {
     match type_of(expr, scope)? {
         DataType::Boolean => Ok(()),
-        found => Err(OracleError::ExpectedBoolean { context, found }),
+        found => Err(PlanError::ExpectedBoolean { context, found }),
     }
 }
 
@@ -259,14 +259,14 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
     match expr {
         Expr::Column(name) => Ok(scope.resolve(name)?.data_type),
 
-        Expr::Literal(Value::Null) => Err(OracleError::UntypedNullLiteral),
-        Expr::Literal(Value::Float(_)) => Err(OracleError::NotInDialect("a FLOAT literal")),
+        Expr::Literal(Value::Null) => Err(PlanError::UntypedNullLiteral),
+        Expr::Literal(Value::Float(_)) => Err(PlanError::NotInDialect("a FLOAT literal")),
         Expr::Literal(v) => v
             .data_type()
             // `data_type()` is `None` only for `Null`, matched above.
-            .ok_or(OracleError::UntypedNullLiteral),
+            .ok_or(PlanError::UntypedNullLiteral),
 
-        Expr::Null(DataType::Float64) => Err(OracleError::NotInDialect("a FLOAT null")),
+        Expr::Null(DataType::Float64) => Err(PlanError::NotInDialect("a FLOAT null")),
         Expr::Null(ty) => Ok(*ty),
 
         Expr::Binary { op, left, right } => {
@@ -276,7 +276,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
                 if lt == DataType::Int64 && rt == DataType::Int64 {
                     Ok(DataType::Int64)
                 } else {
-                    Err(OracleError::TypeMismatch {
+                    Err(PlanError::TypeMismatch {
                         op: op.name(),
                         left: lt,
                         right: rt,
@@ -286,7 +286,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
             {
                 Ok(DataType::Boolean)
             } else {
-                Err(OracleError::TypeMismatch {
+                Err(PlanError::TypeMismatch {
                     op: op.name(),
                     left: lt,
                     right: rt,
@@ -296,7 +296,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
 
         Expr::Not(inner) => match type_of(inner, scope)? {
             DataType::Boolean => Ok(DataType::Boolean),
-            found => Err(OracleError::UnaryTypeMismatch { op: "NOT", found }),
+            found => Err(PlanError::UnaryTypeMismatch { op: "NOT", found }),
         },
 
         Expr::And(left, right) | Expr::Or(left, right) => {
@@ -310,7 +310,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
             if lt == DataType::Boolean && rt == DataType::Boolean {
                 Ok(DataType::Boolean)
             } else {
-                Err(OracleError::TypeMismatch {
+                Err(PlanError::TypeMismatch {
                     op,
                     left: lt,
                     right: rt,
@@ -327,7 +327,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
         Expr::Case { whens, otherwise } => {
             let mut branch_type: Option<DataType> = None;
             if whens.is_empty() {
-                return Err(OracleError::EmptyCase);
+                return Err(PlanError::EmptyCase);
             }
             for (condition, result) in whens {
                 expect_boolean(condition, scope, "a CASE condition")?;
@@ -336,7 +336,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
                     None => branch_type = Some(ty),
                     Some(expected) if expected == ty => {}
                     Some(expected) => {
-                        return Err(OracleError::CaseBranchTypeMismatch {
+                        return Err(PlanError::CaseBranchTypeMismatch {
                             expected,
                             found: ty,
                         })
@@ -348,7 +348,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
                 match branch_type {
                     Some(expected) if expected == ty => {}
                     Some(expected) => {
-                        return Err(OracleError::CaseBranchTypeMismatch {
+                        return Err(PlanError::CaseBranchTypeMismatch {
                             expected,
                             found: ty,
                         })
@@ -356,7 +356,7 @@ pub fn type_of(expr: &Expr, scope: Scope<'_>) -> Result<DataType> {
                     None => branch_type = Some(ty),
                 }
             }
-            branch_type.ok_or(OracleError::EmptyCase)
+            branch_type.ok_or(PlanError::EmptyCase)
         }
     }
 }

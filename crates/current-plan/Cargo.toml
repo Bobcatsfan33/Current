@@ -1,6 +1,6 @@
 [package]
-name = "current-oracle"
-description = "The naive reference engine: recompute from scratch, slow and obvious, the spec."
+name = "current-plan"
+description = "The logical plan, the binder, and the scalar expression library — shared by the oracle and the engine."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 current-zset.workspace = true
-current-plan.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -8,8 +8,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_oracle::plan::{BinOp, GroupBy, Named};
 use current_oracle::{AggFunc, EpochDeltas, Expr, Oracle, OracleError, Query, Source};
+use current_plan::plan::{BinOp, GroupBy, Named};
+use current_plan::PlanError;
 use current_zset::{DataType, Field, Row, Schema, Value};
 
 fn int_table(columns: &[&str]) -> Schema {
@@ -37,6 +38,16 @@ fn oracle_with(entries: Vec<(Row, i64)>) -> Oracle {
     deltas.extend("t", entries);
     oracle.seal_epoch(deltas).unwrap();
     oracle
+}
+
+/// Binding refusals and evaluation errors are `PlanError`s now, reported through
+/// `OracleError::Plan` (D-14). They are *semantics*, shared with the engine, so the tests assert
+/// on the semantic error itself rather than on which enum carried it.
+fn plan_error(error: OracleError) -> PlanError {
+    match error {
+        OracleError::Plan(e) => e,
+        other => panic!("expected a plan error, got: {other}"),
+    }
 }
 
 fn answer(oracle: &Oracle, query: &Query) -> String {
@@ -332,8 +343,8 @@ fn s26_a_cross_join_is_refused_by_name() {
         vec![],
     ));
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::CrossJoinNotSupported
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::CrossJoinNotSupported
     );
 }
 
@@ -346,8 +357,8 @@ fn s26_a_repeated_alias_is_refused() {
         vec![("same.k".to_owned(), "same.k".to_owned())],
     ));
     assert!(matches!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::DuplicateAlias(_) | OracleError::ZSet(_)
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::DuplicateAlias(_) | PlanError::ZSet(_)
     ));
 }
 
@@ -584,8 +595,8 @@ fn s33_a_group_by_with_no_keys_is_refused() {
         having: None,
     });
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::EmptyGroupKeys
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::EmptyGroupKeys
     );
 }
 
@@ -603,8 +614,8 @@ fn s27_a_projection_after_a_group_by_sees_only_the_declared_names() {
     let bad = group_query(vec![Named::new("n", AggFunc::CountStar)], None)
         .project(vec![Named::new("x", Expr::column("t.b"))]);
     assert!(matches!(
-        oracle.answer(&bad).unwrap_err(),
-        OracleError::QualifiedColumnAfterGroupBy(_)
+        plan_error(oracle.answer(&bad).unwrap_err()),
+        PlanError::QualifiedColumnAfterGroupBy(_)
     ));
 }
 
@@ -621,8 +632,8 @@ fn s10_an_unqualified_column_before_a_group_by_is_refused_as_unqualified() {
         Expr::int(1),
     ));
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::UnqualifiedColumn("a".to_owned())
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::UnqualifiedColumn("a".to_owned())
     );
 }
 
@@ -642,8 +653,8 @@ fn s17_where_requires_a_boolean() {
     let oracle = oracle_with(vec![]);
     let query = Query::from(Source::scan("t", "t")).filter(Expr::column("t.a"));
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::ExpectedBoolean {
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::ExpectedBoolean {
             context: "WHERE",
             found: DataType::Int64
         }
@@ -659,8 +670,8 @@ fn s19_there_are_no_implicit_conversions() {
         Expr::string("1"),
     ));
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::TypeMismatch {
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::TypeMismatch {
             op: "=",
             left: DataType::Int64,
             right: DataType::Utf8
@@ -677,8 +688,8 @@ fn s19_an_untyped_null_literal_is_refused_and_a_typed_one_is_not() {
         Expr::Literal(Value::Null),
     ));
     assert_eq!(
-        oracle.answer(&untyped).unwrap_err(),
-        OracleError::UntypedNullLiteral
+        plan_error(oracle.answer(&untyped).unwrap_err()),
+        PlanError::UntypedNullLiteral
     );
 
     let typed = Query::from(Source::scan("t", "t")).filter(Expr::binary(
@@ -698,8 +709,8 @@ fn s3_a_float_column_cannot_be_declared_and_a_float_literal_cannot_be_written() 
     let query = Query::from(Source::scan("t", "t"))
         .project(vec![Named::new("x", Expr::Literal(Value::Float(1.0)))]);
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::NotInDialect("a FLOAT literal")
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::NotInDialect("a FLOAT literal")
     );
 }
 
@@ -717,8 +728,8 @@ fn s30_sum_and_avg_refuse_a_non_integer_argument() {
         having: None,
     });
     assert_eq!(
-        oracle.answer_at(&query, 0).unwrap_err(),
-        OracleError::AggregateTypeUnsupported {
+        plan_error(oracle.answer_at(&query, 0).unwrap_err()),
+        PlanError::AggregateTypeUnsupported {
             func: "SUM",
             ty: DataType::Utf8
         }
@@ -733,8 +744,8 @@ fn s11_a_duplicate_output_name_is_refused() {
         Named::new("x", Expr::column("t.b")),
     ]);
     assert_eq!(
-        oracle.answer(&query).unwrap_err(),
-        OracleError::DuplicateOutputName("x".to_owned())
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::DuplicateOutputName("x".to_owned())
     );
 }
 
@@ -749,9 +760,9 @@ fn s22_an_evaluation_error_aborts_the_epoch_and_is_deterministic() {
         "q",
         Expr::binary(BinOp::Div, Expr::column("t.a"), Expr::column("t.b")),
     )]);
-    let first = oracle.answer(&query).unwrap_err();
-    let second = oracle.answer(&query).unwrap_err();
-    assert_eq!(first, OracleError::DivisionByZero { op: "/" });
+    let first = plan_error(oracle.answer(&query).unwrap_err());
+    let second = plan_error(oracle.answer(&query).unwrap_err());
+    assert_eq!(first, PlanError::DivisionByZero { op: "/" });
     assert_eq!(
         first, second,
         "the same query on the same data errs the same way"

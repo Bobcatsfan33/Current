@@ -72,7 +72,7 @@ fn different_seeds_produce_different_scenarios() {
 /// something downstream is order-sensitive, which I-2 forbids.
 #[test]
 fn shuffling_the_entries_within_an_epoch_does_not_change_any_answer() {
-    use current_differential::EpochInput;
+    use current_zset::EpochDeltas;
 
     for seed in 0..200_u64 {
         let scenario = Scenario::generate(seed).unwrap();
@@ -84,7 +84,7 @@ fn shuffling_the_entries_within_an_epoch_does_not_change_any_answer() {
             .epochs
             .iter()
             .map(|epoch| {
-                let mut out = EpochInput::new();
+                let mut out = EpochDeltas::new();
                 for (table, entries) in epoch.tables() {
                     for (row, weight) in entries.iter().rev() {
                         out.push(table, row.clone(), *weight);

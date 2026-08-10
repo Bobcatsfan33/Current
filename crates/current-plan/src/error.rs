@@ -1,0 +1,105 @@
+//! Errors from binding and from scalar evaluation.
+//!
+//! Two kinds live here and the distinction matters:
+//!
+//! - **Refusals** — the query is outside the dialect, or does not bind. Every one names the
+//!   construct it refused (S-12). A refusal is a statement about the *query*, and it is raised
+//!   before any data is touched, so a badly-typed query fails the same way on an empty database
+//!   as on a full one.
+//! - **Evaluation errors** — overflow, division by zero (S-20, S-21, S-22). A statement about
+//!   the *data*, raised deterministically.
+//!
+//! Everything here is about *semantics*, which is why it lives with the shared plan rather than
+//! with either implementation: the oracle and the engine must refuse the same queries by the same
+//! names and fail on the same data with the same message, or I-1 would be comparing two dialects.
+//! Errors about an implementation's own machinery — catalogs, epochs, malformed history — belong
+//! to that implementation and stay there.
+
+use current_zset::{DataType, ZSetError};
+
+pub type Result<T> = std::result::Result<T, PlanError>;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PlanError {
+    #[error(transparent)]
+    ZSet(#[from] ZSetError),
+
+    #[error("no table named {0:?}")]
+    UnknownTable(String),
+
+    // ---- binding: refusals, each naming its construct (S-12) ------------------------------
+    #[error("{0} is not in the v1 dialect at rungs 1-3")]
+    NotInDialect(&'static str),
+
+    #[error("alias {0:?} is used more than once in one query")]
+    DuplicateAlias(String),
+
+    #[error(
+        "column reference {0:?} is unqualified; before a GROUP BY every column is written \
+         as alias.column (S-10)"
+    )]
+    UnqualifiedColumn(String),
+
+    #[error(
+        "column reference {0:?} is qualified, but after a GROUP BY the only columns are the \
+         declared output names, referenced unqualified (S-10, S-27)"
+    )]
+    QualifiedColumnAfterGroupBy(String),
+
+    #[error("no column named {name:?} in scope {scope}")]
+    UnknownColumn { name: String, scope: String },
+
+    #[error("output name {0:?} is declared more than once")]
+    DuplicateOutputName(String),
+
+    #[error(
+        "untyped NULL literal: write a null with its type, so that binding never has to infer \
+         one (S-19)"
+    )]
+    UntypedNullLiteral,
+
+    #[error("operator {op} does not accept operands of type {left} and {right} (S-19)")]
+    TypeMismatch {
+        op: &'static str,
+        left: DataType,
+        right: DataType,
+    },
+
+    #[error("operator {op} does not accept an operand of type {found} (S-19)")]
+    UnaryTypeMismatch { op: &'static str, found: DataType },
+
+    #[error("{context} requires a Boolean expression but found {found} (S-17)")]
+    ExpectedBoolean {
+        context: &'static str,
+        found: DataType,
+    },
+
+    #[error("CASE branches must all have one type: found {expected} and {found} (S-18)")]
+    CaseBranchTypeMismatch { expected: DataType, found: DataType },
+
+    #[error("CASE has no WHEN branches")]
+    EmptyCase,
+
+    #[error("a GROUP BY with no keys is refused; grand-total aggregation is undecided (S-33)")]
+    EmptyGroupKeys,
+
+    #[error("a join with no key pairs is a cross join, which is not supported at rung 2 (S-26)")]
+    CrossJoinNotSupported,
+
+    // S-32's `AggregateInHaving` refusal has no variant here on purpose: the typed API cannot
+    // express an aggregate inside a HAVING, because `Expr` has no aggregate variant. The illegal
+    // query fails to type-check in Rust, which is stronger than refusing it at bind time. The
+    // refusal becomes real work in C5, when SQL text reaches the binder.
+    #[error("aggregate {func} does not accept an argument of type {ty} (S-30)")]
+    AggregateTypeUnsupported { func: &'static str, ty: DataType },
+
+    // ---- evaluation errors (S-20, S-21, S-22) ---------------------------------------------
+    #[error("arithmetic overflow in {op} (S-20)")]
+    ArithmeticOverflow { op: &'static str },
+
+    #[error("division by zero in {op} (S-21)")]
+    DivisionByZero { op: &'static str },
+
+    #[error("{func} overflowed the Int64 range (S-30)")]
+    AggregateOverflow { func: &'static str },
+}

@@ -162,6 +162,7 @@ name = "current-differential"
 version = "0.0.0"
 dependencies = [
  "current-oracle",
+ "current-plan",
  "current-zset",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
@@ -170,6 +171,15 @@ dependencies = [
 
 [[package]]
 name = "current-oracle"
+version = "0.0.0"
+dependencies = [
+ "current-plan",
+ "current-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "current-plan"
 version = "0.0.0"
 dependencies = [
  "current-zset",

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/current-zset",
+    "crates/current-plan",
     "crates/current-oracle",
     "testing/differential",
 ]
@@ -16,6 +17,7 @@ publish = false
 
 [workspace.dependencies]
 current-zset = { path = "crates/current-zset" }
+current-plan = { path = "crates/current-plan" }
 current-oracle = { path = "crates/current-oracle" }
 
 arrow-array = { version = "59", default-features = false }

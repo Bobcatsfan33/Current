@@ -23,11 +23,13 @@
 //!
 //! ## A tour
 //!
-//! - [`plan`] — the query IR: [`Source`], [`Expr`], [`AggFunc`], [`GroupBy`], [`Query`].
-//! - [`bind`] — resolve columns, type expressions, refuse everything else by name (S-12).
-//! - [`eval`] — scalar evaluation under three-valued logic (S-13…S-22).
-//! - [`aggregate`] — the five aggregates, weight-aware and null-ignoring (S-30, S-31).
 //! - [`engine`] — [`Oracle`]: seal epochs, replay prefixes, recompute answers.
+//! - [`aggregate`] — the five aggregates, weight-aware and null-ignoring (S-30, S-31).
+//!
+//! The query IR, the binder, and the scalar expression library are **not** here: they live in
+//! `current-plan`, because from C1 the engine needs them too and neither implementation may own
+//! the definition of what a query is (D-14). They are re-exported from this crate so that a
+//! reader of the oracle does not have to know that.
 //!
 //! ## Example
 //!
@@ -62,13 +64,15 @@
 //! ```
 
 pub mod aggregate;
-pub mod bind;
 pub mod engine;
 pub mod error;
-pub mod eval;
-pub mod plan;
 
-pub use bind::{bind, Bound, Catalog, Naming, Scope};
-pub use engine::{Epoch, EpochDeltas, Oracle};
+pub use engine::{Epoch, Oracle};
 pub use error::{OracleError, Result};
-pub use plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};
+
+// Re-exported so a reader of the oracle does not have to know where the shared layer lives.
+// The definitions are in `current-plan` (D-14); these are the same types, not copies.
+pub use current_plan::{
+    bind, AggFunc, BinOp, Bound, Catalog, Expr, GroupBy, Named, PlanError, Query, Source,
+};
+pub use current_zset::EpochDeltas;
