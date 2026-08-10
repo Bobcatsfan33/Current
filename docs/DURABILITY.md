@@ -136,7 +136,98 @@ mutations.
 | `CheckpointAfterCurrentBeforeTrim` | C5 → C6 | the new checkpoint is current and the log is longer than it needs to be. Replay of an already-checkpointed prefix must be **harmless**, which it is, because recovery replays only the suffix after the checkpoint's epoch |
 | `CheckpointAfterTrimBeforeCleanup` | C6 → C7 | stale checkpoint directories left behind. Cleaned up on the next open; they are never selected because `CURRENT` names the live one |
 
-## 4 · The recovery sequence
+## 4 · The compaction sequence (C7)
+
+The log cannot grow forever, so a **snapshot** of the input integrals replaces a prefix of it: recovery
+and bootstrap read *snapshot + suffix* instead of the whole history. §6 C7's pitfall is the whole design
+constraint:
+
+> compaction must be publish-then-swap, never in-place; a crash mid-compaction leaves the old log
+> authoritative.
+
+**The invariant compaction must preserve, at every instant:** either the whole log is authoritative, or
+a *published* snapshot plus the retained suffix is. **Never neither.** Every step below is arranged so
+that the only instant at which authority moves is a single rename.
+
+**What compaction is anchored to.** The compaction epoch `E` is the epoch of the **oldest published
+checkpoint still on disk** — `min(published_epochs)`, not the newest. Compaction with no published
+checkpoint is refused: there is nothing for it to be consistent with.
+
+*The newest would be wrong, and this is worth spelling out because it is the mistake this section
+originally made.* Recovery does not always use the newest checkpoint: R1 and R2 **fall back** to an
+older one when the newest fails to verify its manifest, which is exactly what a torn checkpoint
+produces. A compaction anchored to the newest checkpoint would delete the records an older checkpoint
+needs to replay, so the fallback would land on a checkpoint whose suffix is gone — and the recovered
+state would be missing an epoch entirely, silently, because every remaining epoch would replay fine.
+
+An earlier draft of this document anchored to the live checkpoint and argued that making `E` earlier
+"would be pointless". The C4 crash gate disagreed within minutes of compaction being wired into it: a
+torn-checkpoint cycle recovered to epoch 3 where its twin was at epoch 5. The rule is therefore: **the
+anchor is bounded by the oldest checkpoint recovery may still choose**, and every checkpoint on disk is
+one recovery may still choose.
+
+**The arrangement this guarantees, and the one thing that must never happen.** After a compaction,
+`retained_from = E ≤ every published checkpoint's epoch`. So a circuit restored from *any* checkpoint
+finds every epoch it needs to replay. A checkpoint older than the snapshot is not a state to recover
+from cleverly — it is a violated invariant, and recovery refuses loudly rather than skipping the epochs
+it cannot find. (Bootstrap *could* rebuild that circuit from the snapshot, and it would give the same
+answers by I-2; it would not give byte-identical operator *counters*, so it would break the I-7 twin
+comparison. Refusing is honest; substituting a different-but-equal state is not.)
+
+| Step | Action | Durable after? |
+| --- | --- | --- |
+| **P1** | Take `E` = the oldest published checkpoint's epoch; refuse if none is published, or if the log's retained prefix already starts at `E`. | nothing written |
+| **P2** | Write the input integral of every table, as of `E`, into `snap-<E>.partial/` — one Parquet file per table — plus `DEDUP`, the ledger of acknowledged tokens. | not yet |
+| **P3** | `fsync` each file, then the directory. | the files, yes |
+| **P4** | Write `MANIFEST` inside the snapshot — `E`, a checksum and row count per Parquet file, and a checksum over `DEDUP` — and `fsync` it. | the manifest, yes |
+| **P5** | Rename `snap-<E>.partial` → `snap-<E>`, `fsync` the parent. | **the snapshot exists, here** |
+| **P6** | Write the records of every epoch **after** `E`, plus the unsealed pending appends, to a *new* segment file `segment-<k+1>.log.partial`; `fsync`; rename to `segment-<k+1>.log`; `fsync` the parent. | **the retained suffix exists, here — and the old segment is still the authoritative one** |
+| **P7** | Write `LOG` — naming the live segment, the live snapshot, and `E` — by write-to-temp + rename + `fsync` parent. | **THE SWAP. Authority moves here, in one rename.** |
+| **P8** | Delete the superseded segment file. | yes |
+| **P9** | Delete superseded snapshot directories. | yes |
+
+**Why the swap is one pointer and not two.** The snapshot and the retained segment are useless apart:
+the snapshot without the suffix is stale, the suffix without the snapshot has lost its prefix. If they
+were published by two separate commits there would be an instant between them at which neither pairing
+was complete. `LOG` names **both**, so a single rename moves from one consistent pair to another.
+
+**Why the old segment is deleted at P8 and not at P6.** Between P6 and P7 both a whole log and a
+complete snapshot+suffix exist on disk; either could be read and both give the same answers. That
+overlap is not waste, it is the safety margin: deleting the old segment before the pointer moved would
+create the one window in which a crash finds neither pairing.
+
+**The dedup ledger is not optional, and this is the edge that makes compaction dangerous.** R6 rebuilt
+the dedup index by scanning *every* `Append` in the log. Compaction throws away part of that log. A
+token acknowledged in the discarded prefix and re-offered afterwards would then look new, and the batch
+would be applied a second time — I-4 broken, silently, by a *space optimisation*. So the ledger of
+acknowledged tokens rides the snapshot (P2), and R6 is amended below to seed from it. **Compaction
+without the ledger is not a smaller log, it is a lost exactly-once guarantee**, which is why one of
+C7's canonical mutations is to omit it.
+
+**What is in a snapshot and what is not.** The snapshot holds *input integrals* — the accumulated
+contents of each table, consolidated, with zero-weight rows dropped (S-4, S-5) — and the dedup ledger.
+It does **not** hold operator state or answers; that is a checkpoint's job (§3), and the two artifacts
+answer different questions. A checkpoint restores *this* circuit; a snapshot lets *any* circuit be
+built from the data, which is what bootstrap and C6's mid-history attach need.
+
+### Kill points in the compaction sequence
+
+| Kill point | Lands between | What recovery must show |
+| --- | --- | --- |
+| `CompactBeforeSnapshot` | before P2 | nothing written; the whole log is authoritative |
+| `CompactAfterWriteBeforeFsync` | P2 → P3 | a `.partial` snapshot with possibly-torn Parquet. Ignored and deleted; the whole log is authoritative |
+| `CompactAfterFsyncBeforeManifest` | P3 → P4 | a `.partial` with good files but no manifest. Ignored — no manifest, no snapshot |
+| `CompactAfterManifestBeforePublish` | P4 → P5 | a complete `.partial` that was never renamed. **Still ignored**: publication is the commit point |
+| `CompactAfterPublishBeforeSegment` | P5 → P6 | a published snapshot that nothing points at. Ignored — `LOG` is what makes a snapshot live — and the whole log is authoritative |
+| `CompactAfterSegmentBeforePointer` | P6 → P7 | both a whole log and a complete snapshot+suffix on disk, with `LOG` still absent or naming the old pair. **The old log is authoritative**; the new artefacts are orphans, and are cleaned up |
+| `CompactAfterPointerBeforeTrim` | P7 → P8 | the swap happened: snapshot+suffix is authoritative, and the superseded segment is still on disk taking space. Harmless — nothing reads it, because `LOG` does not name it |
+| `CompactAfterTrimBeforeCleanup` | P8 → P9 | stale snapshot directories left behind. Cleaned up on the next open; never selected, because `LOG` names the live one |
+
+Seven of the eight leave the old log authoritative. The eighth, `CompactAfterPointerBeforeTrim`, is the
+first instant at which the snapshot is — and by then it is complete, published, and paired with a
+suffix that was published before it.
+
+## 5 · The recovery sequence
 
 | Step | Action |
 | --- | --- |
@@ -144,9 +235,10 @@ mutations.
 | **R2** | Verify the chosen checkpoint's manifest checksums. On mismatch, discard it and repeat R1 with the next-newest. |
 | **R3** | Load operator state and both circuit stores from it; the circuit is now as of the checkpoint's epoch. |
 | **R4** | Delete every `.partial` directory and every checkpoint not reachable from `CURRENT`. |
-| **R5** | Scan log segments from the beginning of the retained log, verifying each record's CRC. **Stop at the first record that fails CRC or is short** — that is the torn tail, and everything after it is discarded. |
-| **R6** | Rebuild the dedup index from every `Append` record in the retained log. |
-| **R7** | Replay epochs **after** the checkpoint's epoch, sealing each one and stepping the circuit exactly as the live path does. |
+| **R5** | Read `LOG`. If it is present and both artefacts it names exist and verify, the retained log is its segment and the snapshot is its snapshot; otherwise fall back to the default segment with no snapshot, and delete any orphaned `.partial` or unreferenced artefacts (C7, P5–P9). |
+| **R6** | Scan the retained segment from its beginning, verifying each record's CRC. **Stop at the first record that fails CRC or is short** — that is the torn tail, and everything after it is discarded. |
+| **R7** | Rebuild the dedup index: **seed it from the snapshot's `DEDUP` ledger if there is a snapshot**, then add every `Append` record in the retained segment. Seeding is what carries I-4 across a compaction; without it a token acknowledged before the compaction and re-offered after it would be applied twice. |
+| **R8** | Replay epochs **after** the checkpoint's epoch, sealing each one and stepping the circuit exactly as the live path does. |
 
 **Torn tails are expected, not exceptional.** A crash between A5 and A6, or S1 and S2, leaves a
 partial record. R5's rule — stop at the first bad record — is what makes that a non-event. It is
@@ -159,7 +251,25 @@ cleanup — which is itself idempotent, because deleting an already-deleted dire
 is a bug class that has bitten sibling systems, so the gate tests it explicitly rather than arguing
 it from the code.
 
-## 5 · What the crash harness does with this document
+### Bootstrap — building a circuit that was never there (C7)
+
+Recovery restores a circuit that existed. **Bootstrap** builds one that did not: a standing query
+registered now, or a one-shot query, must answer for the *whole* history without replaying it.
+
+| Step | Action |
+| --- | --- |
+| **B1** | Read `LOG`. If a snapshot is live, load each table's integral from its Parquet file and verify it against `MANIFEST`. |
+| **B2** | Feed those integrals to the new circuit as **one delta**, bringing it to the snapshot's epoch `E`. |
+| **B3** | Replay the retained segment's epochs after `E`, sealing each one. |
+
+**Why one delta is not an approximation.** Every operator's state is a function of the *accumulated*
+input rather than of how it was divided into epochs, and every answer is the integral of the sink's
+output deltas — so `Δ₁ + … + Δₙ` applied at once integrates to what the pieces integrate to. That is
+I-2 restated, and it is the same argument C6's mid-history attach rests on. Bootstrap and attach are
+therefore the *same* mechanism with different sources: before a compaction the accumulated input comes
+from the log, after one it comes from the snapshot plus the suffix, and nothing downstream can tell.
+
+## 6 · What the crash harness does with this document
 
 The named kill points above are **deterministic seams in the code**, not timers. Each is a call to a
 fault hook that, when the seed's fault plan selects it, aborts the operation and discards every
@@ -194,7 +304,17 @@ matters:
 - what it does not model: kernel-level reordering of writes that never reached the filesystem, and
   anything the OS does to a dying process that our own code cannot observe.
 
-A separate, smaller test does use real `kill -9` on a child process, over the same scenarios and
-asserting the same invariants. Its job is to check that the in-process model is faithful — if the
-simulation were wrong, the real-kill test is where that shows up. The counts of each are reported
-separately in `docs/PROGRESS.md` rather than added together.
+**Correction (C7).** This section used to say, in the present tense:
+
+> A separate, smaller test does use real `kill -9` on a child process, over the same scenarios and
+> asserting the same invariants.
+
+**It does not, and never has.** C4 planned that test, did not deliver it, and said so in
+`docs/PROGRESS.md` — but this paragraph was left standing as though it described something real. A
+document that claims a test which does not exist is worse than one that admits the gap, because the gap
+is then invisible to anyone reading only the design. It is corrected here rather than quietly deleted.
+
+What exists is in-process fault injection, and only that. The real-kill test's job — checking that the
+in-process model is faithful — is **scheduled at C9**, whose exit gate is `kill -9` under load at 1,000
+random points. Until then, no count in `docs/PROGRESS.md` should be read as a count of process kills,
+and each is reported separately rather than added together.

@@ -1134,9 +1134,19 @@ the step count goes **down**, which is the direction the counter half calls succ
   the set of queries registered right now. Recovering a registry means re-registering — correct, but it
   costs one recomputation per query, and nothing wires it to the log yet. C4's checkpointing still
   covers exactly what it covered: one circuit of a known shape. Named here rather than half-built.
+  **Scheduled: C9, doc-first.** Registry durability is not an implementation detail to be added
+  wherever it fits — a registration is a *client-facing surface*. What a handle means across a
+  restart, whether a client's standing query survives one, and what a resume token addresses are the
+  same question, and §6 C9 already owns the resume token. So the decision is recorded in
+  `docs/DURABILITY.md` and `docs/DECISIONS.md` at C9 entry, before any code, and C7's compaction is
+  built to not prejudge it.
 - **Sharing is not measured for cost, only for count.** "64 steps instead of 104" is a count of
   operator invocations, not time or memory. There is still no benchmark artifact and the engine-constant
-  ledger is still empty (I-10). C8 and C10 own that.
+  ledger is still empty (I-10). **Scheduled: C10.** §6 C10's exit gate is "every number in the README
+  traces to a committed benchmark artifact", and sharing is the number that matters most there —
+  (d) *the swarm benchmark*, the cost of the marginal query among 10,000 near-duplicate standing
+  queries, which §6 calls "Current's game, and the benchmark that defines the product". Until then the
+  honest claim is a step count, and that is all this document claims.
 - **Canonicalization shares less than it could**, deliberately, and the inventory in `canonical.rs`
   names each case: operand order, aliases, filter merging. Every one of those is a *missed* sharing
   opportunity with a recorded reason, not an unknown.
@@ -1149,6 +1159,10 @@ the step count goes **down**, which is the direction the counter half calls succ
   (`MemoEngine`), which exercises registration and catch-up over 4,400 scenarios but shares nothing.
   A fuzzer that generated *overlapping* query sets would be a better I-8 gate than twelve queries
   chosen by hand; it does not exist, and the twelve were chosen to overlap at every rung.
+  **Scheduled: C10**, where it earns its keep twice. The swarm benchmark needs exactly this generator
+  — 10,000 near-duplicate standing queries is a *generated overlapping set*, not a hand-written one —
+  so building it once serves both the benchmark and a strengthened I-8 gate. Two consumers, one
+  generator, and the I-8 gate inherits the population the benchmark is measured on.
 
 ### What C7 needs
 
@@ -1162,3 +1176,173 @@ the step count goes **down**, which is the direction the counter half calls succ
   in C5's, still true.
 
 Per the sprint protocol in `CLAUDE.md`, **C7 does not begin in the session that finished C6.**
+
+---
+
+## C7 — one-shot queries, Parquet ground truth, compaction
+
+**Objective (§6):** be a database, not only a subscription engine.
+
+Everything on §6 C7's list is delivered: `current-batch` with one-shot execution through ephemeral
+circuits, Parquet snapshots of the input integrals, log compaction, and bootstrap-from-snapshot. Two
+things to read first: **compaction is the only operation in this repository that deletes committed
+history**, and **the crash gate caught the design document being wrong before any of it shipped.**
+
+### The compaction sequence went into DURABILITY.md first — and was then corrected by the gate
+
+`docs/DURABILITY.md` §4 numbers P1–P9 and names all eight kill points between them, exactly as A/S/C/R
+were numbered before C4's code. Then compaction was wired into the crash harness, and within minutes it
+failed on the document's own rule.
+
+The draft said the compaction anchor is the epoch of the **live** checkpoint, and argued that an earlier
+anchor "would be pointless". It is not pointless: R1/R2 **fall back** to an older checkpoint when the
+newest fails to verify, which is exactly what a torn checkpoint produces. Anchoring to the newest
+deletes the records an older checkpoint needs, so the fallback lands on a checkpoint whose suffix is
+gone — and the recovered state is missing an epoch entirely, silently, because every *remaining* epoch
+replays fine. The gate reported a torn-checkpoint cycle recovering to epoch 3 where its twin was at
+epoch 5.
+
+**The corrected rule: the anchor is the *oldest* published checkpoint's epoch**, because every
+checkpoint on disk is one recovery may still choose. The correction is in the document with the reason
+and the story, not quietly swapped.
+
+### The shape of it
+
+```text
+   P1 anchor ─ P2 write ─ P3 fsync ─ P4 manifest ─ P5 publish ─┐  the snapshot exists
+   P6 write the retained suffix ────────────────────────────────┤  the old log is STILL authoritative
+   P7 swap the pointer ─────────────────────────────────────────┤  ← the one commit point
+   P8 delete the old segment ─ P9 delete old snapshots ─────────┘
+```
+
+**One pointer names both artefacts.** The snapshot and the retained segment are useless apart — the
+snapshot without the suffix is stale, the suffix without the snapshot has lost its prefix. Publishing
+them with two commits would leave an instant between them at which neither pairing was complete, so
+`LOG` names both and one rename moves from one consistent pair to another. Seven of the eight kill
+points leave the whole log authoritative; the eighth leaves a snapshot that is already complete and
+already paired.
+
+**The old segment is deleted at P8, not P6.** Between P6 and P7 both a whole log and a complete
+snapshot+suffix exist, and either would answer identically. That overlap is the safety margin.
+
+### The edge that makes compaction dangerous, and the model change it forced
+
+R7 rebuilt the dedup index by scanning every `Append` in the log. Compaction throws part of that log
+away, so a token acknowledged in the discarded prefix and re-offered afterwards would look new and the
+batch would be applied twice — **I-4 broken by a space optimisation**, with no error and no crash. The
+ledger of acknowledged tokens therefore rides the snapshot, and `Log::open` seeds from it before
+scanning the retained segment.
+
+Writing the test for that exposed a real modelling gap: `Batch` did not carry its `dedup_token`, so
+compaction — which *rewrites* records rather than copying bytes — had no token to write and invented
+one. The invented tokens then polluted the rebuilt index. The fix was the model, not the symptom: a
+batch now carries the token it was acknowledged under, and a rewritten record carries the token the
+original did. `Log::tokens()` names them, so I-4 is compared by identity rather than by count.
+
+### The gates
+
+| Gate condition (§6 C7) | Proven by | Result |
+| --- | --- | --- |
+| One-shot answers equal the oracle over the fuzz suite | `one_shot_answers_equal_the_oracle_over_the_population` | **4,400 scenarios, 24,747 comparisons, 204 error answers**, through ephemeral circuits |
+| One-shot and standing agree | `a_one_shot_and_a_standing_query_agree` | 500 scenarios answered both ways, identically |
+| Answers byte-identical before/after compaction — live standing queries | `answers_are_byte_identical_across_a_compaction` | 5 standing queries over a 5-epoch history, compacted at epoch 3: every answer unchanged, and equal to the oracle |
+| …and for fresh registrations | same test | a memo registered *after* the compaction, hydrated from snapshot + suffix, answers for the whole history |
+| …and for one-shots over a compacted log | same test | all 5 queries |
+| The snapshot says what the log says | same test | a row inserted and retracted is **absent**; a multiplicity partly retracted is present **at its net weight** |
+| **Four materializations**, Current edition | `four_materializations_of_one_history_agree` | registered at epoch 1 · registered mid-history pre-compaction · registered post-compaction · a one-shot at the end — 4 × 5 answers, all identical, all equal to the oracle |
+| I-4 across a compaction | `a_token_acked_before_a_compaction_is_still_dropped_after_it` | every token re-offered live *and* after a reopen is dropped as a replay; a new token is still accepted |
+| Crash injection extends to every new seam | `ten_thousand_crash_and_recover_cycles` | **26 of 26 named seams fired** (18 + 8 new), 4,780 seam faults, 1,832 byte faults, **1,423 cycles recovered by bootstrap** |
+| Recovery mid-compaction lands on the old log | the eight compaction kill points, asserted by the same twin comparison | a crash at any seam before P7 recovers to a state and a log that mean what the uncrashed twin's do |
+| A compaction that cannot be anchored is refused | `compaction_refuses_what_it_cannot_anchor` | no checkpoint, an already-compacted prefix, and an anchor past the sealed epoch |
+
+**352 tests across the workspace**, zero ignored except the scheduled nightly, zero skipped, zero
+flaky. The crash gate runs in ~75 s; the nightly `SyncPolicy::Full` job compacts too, and was run once
+by hand to prove it.
+
+### Two honest notes about what the crash gate now compares
+
+1. **The twin comparison compares what the log *means*, not which records it holds.** Before C7,
+   `Log::render()` was a fair proxy: nothing removed records. Compaction removes them, and whether a
+   given cycle got as far as its compaction depends on where the crash landed — so two twins routinely
+   hold different records and mean the same thing. The comparison is now epoch + **named** tokens +
+   the accumulated input per table, which is compaction-invariant *and* a stronger statement about I-4
+   than the old rendering, which counted tokens without naming them.
+2. **A recovery that bootstraps has different I-9 emission counters, and the gate says so.** When every
+   checkpoint is torn *and* the log is compacted, there is nothing to restore and no prefix to replay —
+   so recovery rebuilds from the snapshot (B1–B3). The operator state is the same state, because state is
+   a function of the accumulated input (I-2). The *emission counts* differ, because one delta emits
+   differently from many, and those counts are a history of how the state was reached rather than part of
+   it. Those cycles compare a counter-stripped fingerprint, are counted separately (1,423 of 10,000), and
+   are named here rather than folded in silently.
+
+### A coverage loss, caught and repaired
+
+Turning compaction on in the crash harness made `a_torn_checkpoint_is_detected_and_the_previous_one_is_used`
+pass **150/150 through the bootstrap path** — because with compaction on, superseded checkpoints are
+deleted and a torn one leaves nothing to fall back to. It was green, and it had stopped testing the
+fallback its name claims. It now runs with `compact_every: 0` and asserts that the bootstrap path is
+*not* taken, and a new test — `a_torn_checkpoint_over_a_compacted_log_recovers_by_bootstrapping` —
+covers the compacted case and asserts that it *is*. A test whose name has stopped describing what it
+does is worse than no test.
+
+### The gate's teeth
+
+Three mutations, each applied with a marker **grepped before the run** and reverted; `grep -rn MUTANT`
+over `crates/` and `testing/` returns nothing.
+
+| Mutation | Caught by | Blind to it |
+| --- | --- | --- |
+| **(a) consolidation drops a survivor** — the snapshot keeps only weight-1 rows, so a row at weight 2 (two rows present, S-4) is lost | the **before/after identity**: `answers_are_byte_identical_across_a_compaction` failed on "a multiplicity partly retracted keeps its net weight", and `four_materializations_of_one_history_agree` failed too. The crash gate's bootstrap comparison also caught it, on state | the I-4 test and the population sweeps — neither compacts |
+| **(b) the dedup ledger omitted from the snapshot** — an empty `DEDUP`, everything else complete and verifiable | the **I-4-across-compaction test**: a reopened compacted log knew 4 tokens instead of 7. The 10,000-cycle gate caught it independently, at seed 1, as "re-offering token `epoch-0-t0` was not dropped as a replay" | **every answer test.** The data is right; only the exactly-once contract is gone |
+| **(c) in-place swap** — truncate the live segment and write the suffix over it, skipping publish-then-swap | the **crash harness**, at seed 20, as an I-4 violation after recovery | **all six C7 gates**, and they should be: nothing crashes in them, and an in-place swap is correct whenever nothing crashes. That is exactly what makes it a trap |
+
+The three mutations landed in three different instruments, which is the point of having three.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| A Z-set round-trips through Parquet, negative weights and nulls included | `a_table_round_trips_through_parquet` |
+| A row whose net weight is zero is not written | `consolidation_drops_what_is_not_there` |
+| A table cannot have a `__weight` column of its own | `a_reserved_column_name_is_refused` |
+| A snapshot manifest detects its own damage | `a_manifest_round_trips_and_detects_damage` |
+| The dedup ledger round-trips, is byte-stable, and refuses damage | `a_ledger_round_trips`, `encoding_is_byte_stable`, `a_damaged_ledger_is_refused` |
+| An epoch the log no longer holds is reported as compacted, not as out of range | `LogError::EpochCompacted`, raised by `Log::epoch` |
+| A `LOG` pointer that does not verify is treated as absent | `Pointer::decode` plus `read_pointer`'s fallback; the crash gate's byte faults exercise it |
+| Bootstrap and mid-history attach are the same mechanism | `four_materializations_of_one_history_agree` (the post-compaction registration is C6's attach, sourced from a snapshot) |
+| Recovery from a snapshot when every checkpoint is torn | `a_torn_checkpoint_over_a_compacted_log_recovers_by_bootstrapping` (150/150 bootstrapped) |
+| An epoch counter never moves backwards | `CircuitError::EpochWouldGoBackwards`, guarding `Circuit::set_epoch` |
+
+### What C7 does **not** prove
+
+- **Compaction is not automatic.** Nothing decides *when* to compact: the crash harness compacts on an
+  interval because that is how the seams get exercised, and `current-batch::compact` is a function
+  somebody calls. A policy — by log size, by age, by pressure — is a tuning question with a measured
+  answer, and C8 owns tuning with the ledger behind it.
+- **A snapshot is per-table, not per-source.** `source_id` travels with every batch and is *not* carried
+  into the snapshot's integrals, because the integral is a Z-set of rows and source-scoped retraction is
+  C11's subject. When C11 arrives it will need the snapshot to carry provenance, and this is the sentence
+  that says so.
+- **No performance claim.** Parquet write throughput, snapshot size, compaction cost, one-shot latency —
+  none of it is measured, and §6 C10 expects one-shot to lose to DuckDB and says to state that rather
+  than chase it. The engine-constant ledger is still empty.
+- **The nightly job was run once by hand, not on a schedule yet observed.** It compacts with real
+  `fsync` and passed in 63 s; the scheduled runs will accumulate from tonight.
+- **Still no real `kill -9`.** `docs/DURABILITY.md` §6 used to claim, in the present tense, that a
+  subprocess kill test existed. **It never has.** That false claim is corrected in the document with the
+  correction visible, and the test is **scheduled at C9**, whose exit gate is kill -9 under load at 1,000
+  random points. No count in this document is a count of process kills.
+- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4, C5 and C6.
+
+### What C8 needs
+
+- **The state backend decision is due at C8 entry** (D-19: redb), and D-18's trait freeze is provisional
+  until a second backend validates it. C7 added no new `StateBackend` implementations and no new
+  requirements on the trait, so that entry condition is unchanged.
+- **Spill has a ground truth to spill to.** C8's state spill needs somewhere durable for cold state, and
+  the snapshot format — Parquet, verified, published-then-swapped — is the shape that machinery should
+  reuse rather than reinvent.
+- **Compaction policy is a tuning constant**, so it belongs in `testing/evidence/registry.json` with a
+  receipt when it arrives, not in a `const` chosen by taste.
+
+Per the sprint protocol in `CLAUDE.md`, **C8 does not begin in the session that finished C7.**

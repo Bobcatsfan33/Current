@@ -36,6 +36,14 @@ pub enum LogError {
     #[error("epoch {requested} requested but only {sealed} epochs have been sealed")]
     EpochOutOfRange { requested: u64, sealed: u64 },
 
+    /// The epoch asked for is in the snapshot, not the log: compaction discarded its records.
+    #[error("epoch {requested} was compacted away; the log retains epochs after {retained_from}")]
+    EpochCompacted { requested: u64, retained_from: u64 },
+
+    /// Compaction was asked to compact a prefix that is already gone.
+    #[error("nothing to compact: anchor {anchor} is not past the retained prefix {retained_from}")]
+    NothingToCompact { anchor: u64, retained_from: u64 },
+
     /// A fault the crash harness injected at a named seam (`docs/DURABILITY.md` §5).
     ///
     /// Only ever produced when a fault plan selects a seam, and only in tests. It carries the seam's

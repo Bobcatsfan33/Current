@@ -699,6 +699,23 @@ impl Circuit {
         Ok(())
     }
 
+    /// Declare which epoch a **bootstrapped** circuit is as of (`docs/DURABILITY.md` B2).
+    ///
+    /// Bootstrap feeds the accumulated input of epochs `1..=E` as one delta, so the circuit has taken
+    /// one step and is as of epoch `E`. Nothing else may use this: an epoch counter that any caller can
+    /// set is an epoch counter that means nothing, so it refuses to move *backwards* — the direction a
+    /// bug would take it — and it is documented as bootstrap's alone.
+    pub fn set_epoch(&mut self, epoch: Epoch) -> Result<()> {
+        if epoch < self.epoch {
+            return Err(CircuitError::EpochWouldGoBackwards {
+                held: self.epoch,
+                offered: epoch,
+            });
+        }
+        self.epoch = epoch;
+        Ok(())
+    }
+
     /// Seal one epoch: push its deltas through the circuit and fold each sink's output delta into its
     /// result store (S-6, I-3).
     ///

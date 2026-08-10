@@ -20,12 +20,47 @@ pub struct RunOutcome {
     pub fingerprints: Vec<String>,
     /// The answer, or the live error, after every sealed epoch.
     pub answers: Vec<String>,
-    /// The log's own rendering — epochs, batches, tokens.
+    /// What the log **means**: its epoch, the tokens it has acknowledged, and the input it has
+    /// accumulated.
+    ///
+    /// Not `Log::render()`, which lists the records it currently holds. Compaction legitimately
+    /// discards records, so two twins can hold different records and mean the same thing — and after
+    /// C7 they routinely do, because whether a cycle got as far as its compaction depends on where the
+    /// crash landed. Comparing the meaning is both compaction-invariant *and* a stronger statement
+    /// about I-4 than the old rendering, which counted tokens without naming them.
     pub log: String,
     /// The highest epoch the circuit reached.
     pub epoch: u64,
     /// Batches the log accepted, by token. Used for the I-4 check: exactly one epoch each.
     pub accepted_tokens: Vec<String>,
+    /// True if recovery rebuilt the circuit from the snapshot rather than from a checkpoint (C7).
+    ///
+    /// The one case whose **emission counters** legitimately differ from an uncrashed twin's: the state
+    /// is the same state, reached by one delta instead of many. The gate compares a counter-stripped
+    /// fingerprint on these cycles and counts them separately, rather than weakening the comparison for
+    /// every cycle.
+    pub bootstrapped: bool,
+}
+
+/// A fingerprint with the I-9 emission counts removed.
+///
+/// Used only where a bootstrap makes them legitimately different — see [`RunOutcome::bootstrapped`].
+/// Everywhere else the full fingerprint is compared, counters included.
+#[must_use]
+pub fn without_emission_counts(fingerprint: &str) -> String {
+    fingerprint
+        .lines()
+        .map(|line| {
+            let mut kept: Vec<&str> = Vec::new();
+            for part in line.split(' ') {
+                if !part.starts_with("emitted=") && !part.starts_with("budget=") {
+                    kept.push(part);
+                }
+            }
+            kept.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A durable run.
@@ -36,6 +71,9 @@ pub struct Durable {
     log: Log,
     circuit: Circuit,
     sync: SyncPolicy,
+    /// True if this run's recovery had to rebuild the circuit from the snapshot rather than from a
+    /// checkpoint. Reported, because it is the one path whose emission counters legitimately differ.
+    bootstrapped: bool,
 }
 
 impl std::fmt::Debug for Durable {
@@ -52,6 +90,13 @@ impl std::fmt::Debug for Durable {
 pub struct Config {
     /// Take a checkpoint every `checkpoint_every` epochs. 0 means never.
     pub checkpoint_every: u64,
+    /// Compact every `compact_every` epochs, anchored to the live checkpoint. 0 means never.
+    ///
+    /// Compaction is in the crash harness rather than beside it because a compaction is the one
+    /// operation that *deletes* committed history: a crash in the middle of it is the most expensive
+    /// crash the system can have, and the eight seams of `docs/DURABILITY.md` §4 are only tested if the
+    /// 10,000-cycle gate reaches them.
+    pub compact_every: u64,
     /// Whether the log and checkpoints call `fsync`.
     ///
     /// The 10,000-cycle gate uses `Deferred`, because an in-process crash cannot observe the
@@ -64,6 +109,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             checkpoint_every: 2,
+            compact_every: 3,
             sync: SyncPolicy::Deferred,
         }
     }
@@ -100,9 +146,21 @@ impl Durable {
         let catalog: std::collections::BTreeMap<String, Schema> =
             scenario.tables.iter().cloned().collect();
 
-        // R5, R6 · open the log, discarding any torn tail and rebuilding the dedup index.
+        // R5, R6, R7 · open the log: read `LOG`, discard any torn tail, and rebuild the dedup index —
+        // seeded from the snapshot's ledger if a compaction has published one.
         let log =
             Log::open(log_dir(&dir), catalog, faults, _config.sync).map_err(|e| e.to_string())?;
+
+        // R5's cleanup, for compaction's artefacts: `.partial` snapshots from a crashed attempt and
+        // published snapshots the pointer no longer names. Idempotent, so a crash here is a non-event.
+        let live = log
+            .snapshot()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("snap-"))
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .unwrap_or(0);
+        current_batch::compact::cleanup(&log_dir(&dir), live).map_err(|e| e.to_string())?;
 
         // Build a circuit of the right shape. Recovery restores state into it; it never has to guess
         // the shape, because the plan is the same plan.
@@ -111,9 +169,48 @@ impl Durable {
         let mut circuit = engine.into_circuit();
 
         // R1, R2, R4 · choose and verify a checkpoint, deleting partials.
+        let mut restored_from_checkpoint = false;
         if let Some(loaded) = checkpoint::load(ckpt_dir(&dir)).map_err(|e| e.to_string())? {
             circuit.restore(&loaded.state).map_err(|e| e.to_string())?;
+            restored_from_checkpoint = true;
         }
+
+        // The compaction case R1 alone cannot handle: no checkpoint survived, and the log's prefix is
+        // in a snapshot. Refusing here would be unavailability where the data is intact, so recovery
+        // *bootstraps* — hydrate from the snapshot as one delta (B1–B3), then replay the suffix.
+        //
+        // **What this recovers, and what it does not.** The operator state is the same state: every
+        // operator's contents are a function of the accumulated input (I-2), and the snapshot plus the
+        // suffix is that input. What differs is the *emission counters* — the I-9 accounting ledger,
+        // which records how much each node has ever emitted. A bootstrap emits the whole input in one
+        // delta, so it reaches the same state by a shorter route and counts it differently. That is a
+        // real difference and it is why `run_with_fault` compares a counter-stripped fingerprint on
+        // exactly these cycles, and says so.
+        let mut bootstrapped = false;
+        if circuit.epoch() < log.retained_from() {
+            if log.snapshot().is_none() {
+                return Err(format!(
+                    "checkpoint at epoch {} is older than the compacted prefix (retained from {}), \
+                     and there is no snapshot to bootstrap from",
+                    circuit.epoch(),
+                    log.retained_from()
+                ));
+            }
+            let catalog: std::collections::BTreeMap<String, Schema> =
+                scenario.tables.iter().cloned().collect();
+            let integrals =
+                current_batch::hydrate::accumulated_upto(&log, &catalog, log.retained_from())
+                    .map_err(|e| e.to_string())?;
+            let one_delta =
+                current_batch::hydrate::as_one_delta(&integrals).map_err(|e| e.to_string())?;
+            circuit.step(&one_delta).map_err(|e| e.to_string())?;
+            // The circuit is now as of the snapshot's epoch, however many epochs that took to build.
+            circuit
+                .set_epoch(log.retained_from())
+                .map_err(|e| e.to_string())?;
+            bootstrapped = true;
+        }
+        let _ = restored_from_checkpoint;
 
         if faults.reached(Seam::RecoveryAfterCheckpointBeforeReplay) {
             return Err(format!(
@@ -129,6 +226,7 @@ impl Durable {
             log,
             circuit,
             sync: _config.sync,
+            bootstrapped,
         };
 
         // R7 · replay the epochs after the checkpoint's epoch.
@@ -138,6 +236,20 @@ impl Durable {
 
     fn replay_suffix(&mut self, faults: &mut FaultInjector) -> Result<(), String> {
         let sealed = self.log.sealed_epoch();
+        // A circuit restored from a checkpoint at or after the compaction anchor replays only the
+        // retained epochs, which is the arrangement P1 exists to guarantee: the anchor is never past
+        // the live checkpoint, so the records this loop needs are always still there.
+        // A checkpoint older than the snapshot is a violated invariant, not a case to paper over: the
+        // epochs between them exist in neither artefact. Skipping them would recover a state that is
+        // wrong in a way every later epoch would hide.
+        if self.circuit.epoch() < self.log.retained_from() {
+            return Err(format!(
+                "checkpoint at epoch {} is older than the compacted prefix (retained from {}); \
+                 the epochs between them are in neither the checkpoint nor the log",
+                self.circuit.epoch(),
+                self.log.retained_from()
+            ));
+        }
         let mut at = self.circuit.epoch();
         while at < sealed {
             at += 1;
@@ -197,7 +309,60 @@ impl Durable {
             checkpoint::take(ckpt_dir(&self.dir), &self.circuit, faults, self.sync)
                 .map_err(|e| e.to_string())?;
         }
+
+        // §4 · compaction, on its own interval. Anchored to the live checkpoint (P1): compacting past
+        // it would delete records recovery still needs.
+        if config.compact_every > 0 && self.circuit.epoch() % config.compact_every == 0 {
+            self.compact(faults)?;
+        }
         Ok(())
+    }
+
+    /// One compaction, anchored to the newest published checkpoint (`docs/DURABILITY.md` §4).
+    ///
+    /// A compaction that cannot be anchored, or whose prefix is already gone, is not an error the run
+    /// should fail on — it is a compaction that has nothing to do.
+    pub fn compact(&mut self, faults: &mut FaultInjector) -> Result<(), String> {
+        // P1 · the **oldest** published checkpoint, not the newest. R1/R2 may fall back to any
+        // checkpoint on disk, and a compaction past one of them would delete the records that
+        // checkpoint needs to replay — see `docs/DURABILITY.md` §4, where the crash gate's discovery of
+        // exactly that is recorded.
+        let anchor = checkpoint::published_epochs(ckpt_dir(&self.dir))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .min()
+            .unwrap_or(0);
+        if anchor == 0 || anchor <= self.log.retained_from() || anchor > self.log.sealed_epoch() {
+            return Ok(());
+        }
+        let catalog: std::collections::BTreeMap<String, Schema> =
+            self.tables.iter().cloned().collect();
+        let integrals = current_batch::hydrate::accumulated_upto(&self.log, &catalog, anchor)
+            .map_err(|e| e.to_string())?;
+        current_batch::compact(&mut self.log, anchor, &integrals, faults, self.sync)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// What the log means, rendered so two twins can be compared across a compaction.
+    pub fn log_meaning(&self) -> Result<String, String> {
+        let catalog: std::collections::BTreeMap<String, Schema> =
+            self.tables.iter().cloned().collect();
+        let integrals =
+            current_batch::hydrate::accumulated(&self.log, &catalog).map_err(|e| e.to_string())?;
+        let mut out = format!(
+            "log @ epoch {} · {} token(s)\n",
+            self.log.sealed_epoch(),
+            self.log.known_tokens()
+        );
+        for token in self.log.tokens() {
+            out.push_str(&format!("  token {token}\n"));
+        }
+        for (table, integral) in &integrals {
+            out.push_str(&format!("input {table}\n"));
+            out.push_str(&integral.canonical().map_err(|e| e.to_string())?.render());
+        }
+        Ok(out)
     }
 
     /// The outcome so far, for comparison.
@@ -211,9 +376,10 @@ impl Durable {
                 Ok(answer) => answer.render(),
                 Err(e) => format!("ERROR: {e}"),
             }],
-            log: self.log.render(),
+            log: self.log_meaning()?,
             epoch: self.circuit.epoch(),
             accepted_tokens: Vec::new(),
+            bootstrapped: self.bootstrapped,
         })
     }
 
@@ -246,6 +412,17 @@ impl Durable {
     pub fn known_tokens(&self) -> usize {
         self.log.known_tokens()
     }
+
+    /// Whether recovery rebuilt this circuit from the snapshot instead of a checkpoint.
+    #[must_use]
+    pub fn bootstrapped(&self) -> bool {
+        self.bootstrapped
+    }
+
+    #[must_use]
+    pub fn retained_from(&self) -> u64 {
+        self.log.retained_from()
+    }
 }
 
 /// Run a scenario cleanly to the end, returning the outcome after every epoch.
@@ -267,9 +444,10 @@ pub fn run_clean(
     Ok(RunOutcome {
         fingerprints,
         answers,
-        log: durable.log.render(),
+        log: durable.log_meaning()?,
         epoch: durable.epoch(),
         accepted_tokens: Vec::new(),
+        bootstrapped: durable.bootstrapped(),
     })
 }
 
@@ -383,6 +561,7 @@ pub fn run_with_fault(
             log: out.log,
             epoch: durable.epoch(),
             accepted_tokens: Vec::new(),
+            bootstrapped: durable.bootstrapped(),
         },
         fired,
     ))

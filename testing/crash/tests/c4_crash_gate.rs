@@ -15,7 +15,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use current_crash::{run_clean, run_with_fault, Config, Fault, FaultChoice};
+use current_crash::{
+    run_clean, run_with_fault, without_emission_counts, Config, Fault, FaultChoice,
+};
 use current_differential::{CircuitEngine, Scenario};
 use current_log::Seam;
 
@@ -48,6 +50,7 @@ fn ten_thousand_crash_and_recover_cycles() {
     let mut faults_fired = 0u64;
     let mut byte_faults = 0u64;
     let mut clean_runs = 0u64;
+    let mut bootstrapped_cycles = 0u64;
     let mut seams_fired: BTreeSet<&'static str> = BTreeSet::new();
     let mut seams_planned: BTreeSet<&'static str> = BTreeSet::new();
 
@@ -89,11 +92,31 @@ fn ten_thousand_crash_and_recover_cycles() {
             clean.answers.last(),
             "seed {seed}: the recovered answer differs from the uncrashed twin (I-7)"
         );
-        assert_eq!(
-            recovered.fingerprints.last(),
-            clean.fingerprints.last(),
-            "seed {seed}: the recovered STATE differs from the uncrashed twin (I-7)"
-        );
+        // The state comparison. A run whose recovery had to **bootstrap** from the snapshot — every
+        // checkpoint torn, the log's prefix compacted away — reaches the same state by a different
+        // route: one delta instead of many. Its operator contents match; its I-9 emission counts do
+        // not, because it genuinely emitted differently. So those cycles compare the state without the
+        // counters, and are counted separately below rather than quietly folded in.
+        if recovered.bootstrapped {
+            bootstrapped_cycles += 1;
+            assert_eq!(
+                recovered
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                clean
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                "seed {seed}: a bootstrapped recovery must hold the same state as the twin (I-7)"
+            );
+        } else {
+            assert_eq!(
+                recovered.fingerprints.last(),
+                clean.fingerprints.last(),
+                "seed {seed}: the recovered STATE differs from the uncrashed twin (I-7)"
+            );
+        }
         assert_eq!(
             recovered.epoch, clean.epoch,
             "seed {seed}: the recovered epoch differs"
@@ -112,7 +135,7 @@ fn ten_thousand_crash_and_recover_cycles() {
     println!(
         "C4 crash gate: {cycles} cycles over {seed} seeds · {faults_fired} seam faults fired · \
          {byte_faults} byte-boundary faults · {clean_runs} clean runs · \
-         {} of {} named seams fired",
+         {bootstrapped_cycles} recovered by bootstrap · {} of {} named seams fired",
         seams_fired.len(),
         Seam::all().len()
     );
@@ -217,9 +240,18 @@ fn recovery_is_idempotent_under_a_crash_during_recovery() {
 }
 
 /// A torn checkpoint is detected and the previous one is used, with the log covering the gap.
+///
+/// **Compaction is off in this test on purpose (C7).** With it on, `checkpoint::take` deletes superseded
+/// checkpoints and compaction trims to the oldest survivor, so a torn checkpoint leaves *nothing* to
+/// fall back to and recovery bootstraps from the snapshot instead — which is correct, and is covered by
+/// `a_torn_checkpoint_over_a_compacted_log_recovers_by_bootstrapping` below. It is not what this test's
+/// name claims, and a test whose name has stopped describing what it does is worse than no test: the
+/// first version of this change left it passing 150/150 through the bootstrap path, testing the
+/// fallback nowhere.
 #[test]
 fn a_torn_checkpoint_is_detected_and_the_previous_one_is_used() {
     let mut checked = 0;
+    let mut bootstrapped = 0usize;
     let mut seed = 0u64;
     while checked < 150 {
         seed += 1;
@@ -230,7 +262,10 @@ fn a_torn_checkpoint_is_detected_and_the_previous_one_is_used() {
         if scenario.epochs.len() < 4 {
             continue;
         }
-        let config = Config::default();
+        let config = Config {
+            compact_every: 0,
+            ..Config::default()
+        };
 
         let clean_dir = dir_for(seed, "torn-clean");
         let clean = run_clean(&clean_dir, &scenario, config).unwrap();
@@ -253,15 +288,111 @@ fn a_torn_checkpoint_is_detected_and_the_previous_one_is_used() {
             clean.answers.last(),
             "seed {seed}: a torn checkpoint must not change the answer"
         );
-        assert_eq!(
-            recovered.fingerprints.last(),
-            clean.fingerprints.last(),
-            "seed {seed}: a torn checkpoint must not change the state"
-        );
+        // A torn checkpoint over a *compacted* log leaves recovery with nothing to restore from, so it
+        // bootstraps from the snapshot instead (C7). Same state, one delta instead of many, therefore
+        // different I-9 emission counts — compared without them, and counted, exactly as the
+        // 10,000-cycle gate does.
+        if recovered.bootstrapped {
+            bootstrapped += 1;
+            assert_eq!(
+                recovered
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                clean
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                "seed {seed}: a bootstrapped recovery must hold the same state"
+            );
+        } else {
+            assert_eq!(
+                recovered.fingerprints.last(),
+                clean.fingerprints.last(),
+                "seed {seed}: a torn checkpoint must not change the state"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&clean_dir);
         checked += 1;
     }
+    println!("torn-checkpoint gate: {checked} scenarios, compaction off, fallback exercised");
     assert!(checked >= 150);
+    assert_eq!(
+        bootstrapped, 0,
+        "with compaction off this test must exercise the *fallback*, not the bootstrap path"
+    );
+}
+
+/// Every checkpoint torn **and** the log compacted: recovery rebuilds from the snapshot (C7, B1–B3).
+///
+/// The case that makes the snapshot load-bearing for availability rather than only for space. There is
+/// no checkpoint to restore and no log prefix to replay, and the data is nevertheless all there — so
+/// refusing would be unavailability with intact data.
+#[test]
+fn a_torn_checkpoint_over_a_compacted_log_recovers_by_bootstrapping() {
+    let mut checked = 0usize;
+    let mut bootstrapped = 0usize;
+    let mut seed = 0u64;
+    while checked < 150 {
+        seed += 1;
+        let Ok(scenario) = Scenario::generate(seed) else {
+            continue;
+        };
+        if scenario.epochs.len() < 4 {
+            continue;
+        }
+        // Compaction on, which is the default — stated here because it is the whole point.
+        let config = Config::default();
+
+        let clean_dir = dir_for(seed, "boot-clean");
+        let clean = run_clean(&clean_dir, &scenario, config).unwrap();
+
+        let dir = dir_for(seed, "boot");
+        let (recovered, _) = run_with_fault(
+            &dir,
+            &scenario,
+            Fault::Bytes {
+                epoch_index: 0,
+                offset: 3,
+                truncate: false,
+            },
+            config,
+        )
+        .unwrap_or_else(|e| panic!("seed {seed}: recovery over a compacted log failed: {e}"));
+
+        assert_eq!(
+            recovered.answers.last(),
+            clean.answers.last(),
+            "seed {seed}: bootstrapping from a snapshot must not change the answer (I-1, I-7)"
+        );
+        assert_eq!(
+            recovered.log, clean.log,
+            "seed {seed}: and it must not change what the log means (I-4)"
+        );
+        if recovered.bootstrapped {
+            bootstrapped += 1;
+            assert_eq!(
+                recovered
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                clean
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                "seed {seed}: a bootstrapped recovery must hold the same state"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&clean_dir);
+        checked += 1;
+    }
+    println!("bootstrap-recovery gate: {checked} scenarios · {bootstrapped} bootstrapped");
+    assert!(
+        bootstrapped >= 100,
+        "only {bootstrapped} of {checked} exercised the bootstrap path"
+    );
 }

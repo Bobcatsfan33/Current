@@ -23,6 +23,11 @@ pub enum CircuitError {
     #[error("sink {0} does not exist in this circuit")]
     UnknownSink(usize),
 
+    /// An epoch counter may only move forward. A reader that saw epoch 5 must never be told the world
+    /// is now at epoch 3 (I-3).
+    #[error("a circuit at epoch {held} cannot be declared to be at epoch {offered}")]
+    EpochWouldGoBackwards { held: u64, offered: u64 },
+
     /// A node was freed while something still read it — a refcount bug in the memo, caught here
     /// rather than becoming an empty answer downstream (I-8).
     #[error("node {node} cannot be freed: node {consumer} still reads it")]

@@ -23,6 +23,7 @@
 //! list in code, and the crash harness lands on those seams. If you change an ordering here, change
 //! the document first (§10).
 
+pub mod dedup;
 pub mod error;
 pub mod fault;
 pub mod log;
@@ -30,5 +31,5 @@ pub mod record;
 
 pub use error::{LogError, Result};
 pub use fault::{FaultInjector, FaultPlan, Seam};
-pub use log::{Ack, Batch, Epoch, Log, SyncPolicy};
+pub use log::{Ack, Batch, Epoch, Log, Pointer, SyncPolicy};
 pub use record::Record;

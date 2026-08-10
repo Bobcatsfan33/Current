@@ -42,6 +42,7 @@ fn crash_and_recover_with_real_fsync() {
 
     let mut cycles = 0u64;
     let mut faults_fired = 0u64;
+    let mut bootstrapped = 0u64;
     let mut seed = 0u64;
 
     while cycles < CYCLES {
@@ -73,9 +74,29 @@ fn crash_and_recover_with_real_fsync() {
             clean.answers.last(),
             "seed {seed}: the recovered answer differs from the uncrashed twin (I-7)"
         );
+        // The same bootstrap allowance the ordinary gate makes (C7): a recovery that had to rebuild
+        // from the snapshot holds the same state by a different route, so its I-9 emission counts
+        // differ. `Config::durable()` compacts like the ordinary gate, so this path is reached here too.
+        let (recovered_state, clean_state) = if recovered.bootstrapped {
+            bootstrapped += 1;
+            (
+                recovered
+                    .fingerprints
+                    .last()
+                    .map(|f| current_crash::without_emission_counts(f)),
+                clean
+                    .fingerprints
+                    .last()
+                    .map(|f| current_crash::without_emission_counts(f)),
+            )
+        } else {
+            (
+                recovered.fingerprints.last().cloned(),
+                clean.fingerprints.last().cloned(),
+            )
+        };
         assert_eq!(
-            recovered.fingerprints.last(),
-            clean.fingerprints.last(),
+            recovered_state, clean_state,
             "seed {seed}: the recovered state differs from the uncrashed twin (I-7)"
         );
         assert_eq!(
@@ -90,7 +111,7 @@ fn crash_and_recover_with_real_fsync() {
 
     println!(
         "C4 nightly (SyncPolicy::Full): {cycles} cycles over {seed} seeds · {faults_fired} faults \
-         fired · every write fsynced. This observes nothing an in-process crash could not observe \
+         fired · {bootstrapped} recovered by bootstrap · every write fsynced. This observes nothing an in-process crash could not observe \
          at Deferred; it exists so the fsync path cannot rot."
     );
     assert_eq!(cycles, CYCLES);

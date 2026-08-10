@@ -19,7 +19,7 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C6 complete (with the gaps named below)
+## Status: Sprint C7 complete (with the gaps named below)
 
 Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
@@ -42,6 +42,17 @@ common: register two queries with the same `WHERE` and the filter is stepped onc
 twice. Sharing is asserted to be invisible — the same battery run with sharing on and off gives
 byte-identical answers — *and* asserted to actually happen, because a memo that quietly stopped
 sharing would still be correct: 64 operator steps instead of 104 over the gate's battery.
+
+**The log does not grow forever.** Compaction replaces a prefix of it with a Parquet snapshot of the
+accumulated input, published-then-swapped so that a crash at any point leaves the old log
+authoritative. Nothing downstream can tell: a standing query mid-flight, a query registered after the
+compaction, and a one-shot asked at the end all produce byte-identical answers — checked against a
+from-scratch recomputation, four materializations at a time. The snapshots are ordinary Parquet, so the
+ground truth is readable by tools that are not us.
+
+**One-shot queries** run through the same machinery as standing ones — the same binder, the same
+operators, one big delta, torn down after — because a second execution path would be a second set of
+answers to keep right.
 
 **What does not exist yet:** no server (C9). Nothing here is usable as a database today, and nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
@@ -85,6 +96,7 @@ crates/current-ops/      circuit operators: filter, project, equi-join, aggregat
 crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
 crates/current-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
 crates/current-memo/     canonicalization, structural hashing, the standing-query registry
+crates/current-batch/    one-shot queries, Parquet snapshots, log compaction, bootstrap
 crates/current-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
 crates/current-log/      the input log: a directory of files, epoch sealing, exactly-once admission
 testing/crash/           the crash harness: named seams, byte faults, recovery vs an uncrashed twin
@@ -96,7 +108,10 @@ docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 `current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
-**Known limitations, before you find them:** the memo is **not durable** — its shape is the set of
+**Known limitations, before you find them:** **nothing decides when to compact** — compaction is a
+function somebody calls, and a policy is a tuning question C8 owns with a receipt. A snapshot holds
+rows, not provenance: `source_id` travels with every batch but is not carried into the snapshot, which
+C11's source-scoped retraction will need. The memo is **not durable** — its shape is the set of
 queries registered right now, and recovering a registry means re-registering, which costs one
 recomputation per query. Registering a standing query is O(data) by design; maintaining it is
 O(change). The SQL door is narrower than the typed API in one

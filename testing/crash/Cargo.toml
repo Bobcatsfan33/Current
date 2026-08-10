@@ -12,6 +12,7 @@ publish.workspace = true
 current-circuit.workspace = true
 current-differential.workspace = true
 current-log.workspace = true
+current-batch.workspace = true
 current-ops.workspace = true
 current-plan.workspace = true
 current-state.workspace = true

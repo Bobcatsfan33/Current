@@ -27,5 +27,7 @@
 pub mod runtime;
 pub mod scenario_fault;
 
-pub use runtime::{run_clean, run_with_fault, Config, Durable, RunOutcome};
+pub use runtime::{
+    run_clean, run_with_fault, without_emission_counts, Config, Durable, RunOutcome,
+};
 pub use scenario_fault::{Fault, FaultChoice};

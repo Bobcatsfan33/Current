@@ -31,7 +31,16 @@ pub enum Seam {
     CheckpointAfterPublishBeforeCurrent,
     CheckpointAfterCurrentBeforeTrim,
     CheckpointAfterTrimBeforeCleanup,
-    // ---- recovery (§4) ----
+    // ---- the compaction sequence (§4, C7) ----
+    CompactBeforeSnapshot,
+    CompactAfterWriteBeforeFsync,
+    CompactAfterFsyncBeforeManifest,
+    CompactAfterManifestBeforePublish,
+    CompactAfterPublishBeforeSegment,
+    CompactAfterSegmentBeforePointer,
+    CompactAfterPointerBeforeTrim,
+    CompactAfterTrimBeforeCleanup,
+    // ---- recovery (§5) ----
     /// A crash *during* recovery. Recovery must be idempotent: recovering again must reach the same
     /// state. This is a bug class that has bitten sibling systems, so it is a seam rather than an
     /// argument.
@@ -61,6 +70,14 @@ impl Seam {
             Seam::CheckpointAfterPublishBeforeCurrent,
             Seam::CheckpointAfterCurrentBeforeTrim,
             Seam::CheckpointAfterTrimBeforeCleanup,
+            Seam::CompactBeforeSnapshot,
+            Seam::CompactAfterWriteBeforeFsync,
+            Seam::CompactAfterFsyncBeforeManifest,
+            Seam::CompactAfterManifestBeforePublish,
+            Seam::CompactAfterPublishBeforeSegment,
+            Seam::CompactAfterSegmentBeforePointer,
+            Seam::CompactAfterPointerBeforeTrim,
+            Seam::CompactAfterTrimBeforeCleanup,
             Seam::RecoveryAfterCheckpointBeforeReplay,
             Seam::RecoveryMidReplay,
         ]
@@ -85,6 +102,14 @@ impl Seam {
             Seam::CheckpointAfterPublishBeforeCurrent => "CheckpointAfterPublishBeforeCurrent",
             Seam::CheckpointAfterCurrentBeforeTrim => "CheckpointAfterCurrentBeforeTrim",
             Seam::CheckpointAfterTrimBeforeCleanup => "CheckpointAfterTrimBeforeCleanup",
+            Seam::CompactBeforeSnapshot => "CompactBeforeSnapshot",
+            Seam::CompactAfterWriteBeforeFsync => "CompactAfterWriteBeforeFsync",
+            Seam::CompactAfterFsyncBeforeManifest => "CompactAfterFsyncBeforeManifest",
+            Seam::CompactAfterManifestBeforePublish => "CompactAfterManifestBeforePublish",
+            Seam::CompactAfterPublishBeforeSegment => "CompactAfterPublishBeforeSegment",
+            Seam::CompactAfterSegmentBeforePointer => "CompactAfterSegmentBeforePointer",
+            Seam::CompactAfterPointerBeforeTrim => "CompactAfterPointerBeforeTrim",
+            Seam::CompactAfterTrimBeforeCleanup => "CompactAfterTrimBeforeCleanup",
             Seam::RecoveryAfterCheckpointBeforeReplay => "RecoveryAfterCheckpointBeforeReplay",
             Seam::RecoveryMidReplay => "RecoveryMidReplay",
         }

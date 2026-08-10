@@ -10,6 +10,7 @@ members = [
     "crates/current-circuit",
     "crates/current-sql",
     "crates/current-memo",
+    "crates/current-batch",
     "testing/differential",
     "testing/crash",
 ]
@@ -33,10 +34,15 @@ current-ops = { path = "crates/current-ops" }
 current-circuit = { path = "crates/current-circuit" }
 current-sql = { path = "crates/current-sql" }
 current-memo = { path = "crates/current-memo" }
+current-batch = { path = "crates/current-batch" }
 
 arrow-array = { version = "59", default-features = false }
 arrow-buffer = { version = "59", default-features = false }
 arrow-schema = { version = "59", default-features = false }
+# Parquet is the ground-truth snapshot format (§6 C7). Pinned to the same major as arrow-*: the two
+# share `arrow-array`/`arrow-schema` types, and a mismatch is a type error rather than a runtime
+# surprise, which is the point of pinning both.
+parquet = { version = "59", default-features = false, features = ["arrow"] }
 thiserror = { version = "2", default-features = false, features = ["std"] }
 # The parser, and only the parser: sqlparser produces an AST, and the binder decides what any of
 # it means. A construct parsing is never a reason to support it (S-35).
