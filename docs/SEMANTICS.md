@@ -1,0 +1,449 @@
+# SEMANTICS — what a query means in Current
+
+**Scope: dialect rungs 1–3** (ARCHITECTURE.md §5.6):
+
+1. SELECT / WHERE / projection with the scalar expression library
+2. INNER equi-JOIN
+3. GROUP BY + SUM/COUNT/MIN/MAX/AVG + HAVING
+
+Rungs 4 (DISTINCT, UNION ALL, ORDER BY/LIMIT) and 5 (LEFT JOIN, decorrelatable subqueries) are
+**not** defined here and are not implemented. Anything not defined in this document is refused by
+name, never silently accepted.
+
+**This document is written before the code.** Per §10, semantics change here first, in
+`current-oracle` second, in the engine third. When the differential harness reports a
+disagreement, this document decides who is wrong; if this document is wrong, it is corrected here
+before either implementation moves.
+
+Every rule below is numbered `S-n` so that tests and commits can cite it.
+
+---
+
+## 1. Data model
+
+### S-1 · Values
+
+A value is one of:
+
+| Value | Notes |
+| --- | --- |
+| `Null` | the absence of a value; see §3 |
+| `Int(i64)` | 64-bit signed integer |
+| `Str(String)` | UTF-8 string |
+| `Bool(bool)` | |
+| `Float(f64)` | **result-only** — see S-3 |
+
+### S-2 · Types and schemas
+
+A schema is an ordered list of `(name, type, nullable)`. Types are `Int64`, `Utf8`, `Boolean`,
+`Float64`. Column names within a schema are unique. A value of type `T` in a column is either a
+`T` value or `Null`; `nullable: false` is an assertion the oracle checks on ingest and reports as
+a named error if violated — it is never used to skip null handling in an operator.
+
+### S-3 · Float64 is a result-only type in v1
+
+**No table column may be declared `Float64`, and no scalar expression produces a `Float64`.** The
+only source of a `Float64` in the entire system is `AVG` (S-31).
+
+*Why.* Floating-point addition is not associative. An incremental `SUM` maintains a running
+total; the oracle recomputes the total from scratch in a different order. For `f64` those two
+answers differ in the low bits, and I-1 demands byte-for-byte equality — so a `Float64` sum would
+put the load-bearing invariant of the project in permanent, unwinnable conflict with the laws of
+IEEE-754. Integers do not have this problem: `i64` addition is associative and exact.
+
+`AVG` is safe because it is not accumulated: both the oracle and (later) the engine maintain an
+exact integer `SUM` and an exact integer `COUNT`, and perform **exactly one** division at emit
+time (S-31). A single division of two identically-derived integers is bit-identical everywhere.
+
+Decimal/fixed-point arithmetic is the honest long-term answer for non-integer data. It is
+deferred, deliberately, and is recorded as an open decision in `docs/DECISIONS.md`.
+
+### S-4 · Rows, Z-sets, and weights
+
+A row is a value per schema column. All data is a **Z-set**: a multiset of rows in which each row
+carries an `i64` **weight**. Weight `+3` means three copies of the row; `-1` means one copy is
+removed. There is no separate delete or update machinery: an update is `-1` for the old row and
+`+1` for the new row, in the same Z-set (§1 of ARCHITECTURE.md).
+
+A Z-set is **consolidated** when no two entries hold equal rows and no entry has weight zero.
+Consolidation is the canonical form; equality of Z-sets is defined on it (S-8).
+
+### S-5 · Table contents are non-negative; a negative integral is malformed history
+
+The contents of a table at epoch N are the **integral** of its deltas: the epoch-by-epoch sum of
+weights for each row, from epoch 1 through N.
+
+**A table's integral must have non-negative weights at every sealed epoch.** A history that
+retracts a row that is not present — or retracts more copies than are present — is *malformed*,
+and the oracle rejects it with a named error (`NegativeIntegral`) naming the table, the row, and
+the epoch.
+
+*Why this is a rule and not a definition.* Defining an answer for "-2 copies of a row" would be
+inventing semantics no user asked for, and it would let a generator bug or an ingest bug travel
+silently through the whole engine and come out the far end as a plausible-looking number. The
+scenario generator maintains a model of current contents and only ever retracts rows that are
+present; if the generator ever violates that, the oracle says so loudly.
+
+Intermediate and output Z-sets are **not** subject to this rule: a *delta* on a table's output
+naturally carries negative weights, and that is the entire point (I-5).
+
+### S-6 · Epochs
+
+An epoch is the unit of time and atomicity. Input deltas are assembled into an epoch; sealing the
+epoch makes them visible together. Epochs are dense integers starting at 1. An answer is always
+"as of epoch N", never a mixture (I-3). An epoch may be **empty** (no deltas for any table); its
+answer equals the previous epoch's answer.
+
+The oracle computes the answer at epoch N by integrating all input deltas for epochs 1..=N and
+recomputing the query from scratch over that integral. That is the whole implementation strategy,
+and it is why the oracle is trustworthy.
+
+### S-7 · Total order on values
+
+Every ordering in Current is total (D-7). The order on values is:
+
+1. **`Null` sorts before every non-null value.** (Chosen, not inherited: SQL leaves it
+   implementation-defined. Nulls-first is a single fixed rule with no `NULLS FIRST/LAST` modifier
+   in the dialect, so there is nothing to disagree about.)
+2. Non-null values of the same type compare within the type:
+   - `Int64`: numeric order.
+   - `Boolean`: `false < true`.
+   - `Utf8`: byte-wise lexicographic order of the UTF-8 encoding (equivalently, code-point order).
+     **Not** locale- or collation-aware. There is no collation in the v1 dialect.
+   - `Float64`: IEEE-754 total order (`f64::total_cmp`). `NaN` cannot arise (S-31), but the order
+     is total regardless so that no comparison is ever undefined.
+3. Values of different types never occur in the same column (S-2), so cross-type comparison does
+   not arise in ordering.
+
+### S-8 · Canonical form and answer equality
+
+Two answers are equal iff their **canonical forms** are identical. The canonical form of a Z-set
+is:
+
+1. **consolidate** — merge entries with equal rows by summing weights, then drop every entry
+   whose weight is zero;
+2. **sort** — order the remaining entries by all columns in schema order, using S-7.
+
+After consolidation rows are unique, so step 2 yields a total order with no ties and no tiebreak
+is needed beyond "all columns in schema order" — which is exactly the D-7 rule.
+
+Answer equality also requires **schema equality**: same column names, in the same order, with the
+same types. Two Z-sets with equal rows and different schemas are not equal answers.
+
+This canonical form is what the differential harness compares (I-1), and it is what "byte for
+byte" means at rungs 1–3. `ORDER BY` is a rung-4, read-time concern and does not change it.
+
+---
+
+## 2. Queries
+
+### S-9 · Query shape
+
+A rung-1–3 query is:
+
+```
+FROM     Scan(table, alias)  |  Join(left, right, ON key-pairs)
+WHERE    optional predicate
+GROUP BY optional { keys, aggregates, optional HAVING }
+SELECT   optional projection
+```
+
+evaluated strictly in that order: **from → where → group → having → select**. Each stage consumes
+the Z-set the previous stage produced.
+
+### S-10 · Column references and aliases
+
+Every scan carries an alias. Inside a query, a column is referenced as `alias.column`. This is the
+only form; unqualified references are refused (`UnqualifiedColumn`) rather than resolved by
+search. After a GROUP BY, the columns available are exactly the declared output names of the group
+keys and aggregates, referenced unqualified — grouping erases the input schema (S-27).
+
+### S-11 · Output names are explicit
+
+Every projection element, group key, and aggregate declares its output name explicitly. Current
+does not derive names from expressions at rungs 1–3. (SQL's name-derivation rules arrive with the
+binder in C5 and will be specified then; they are a *frontend* question, not a semantic one.)
+
+Duplicate output names in one schema are refused (`DuplicateOutputName`).
+
+### S-12 · Binding is total and refusals are named
+
+Before evaluation, a query is **bound**: every column reference is resolved, every expression is
+type-checked, and every construct is checked against the dialect. Binding either succeeds with a
+fully typed plan, or fails with an error that **names the offending construct**. A query is never
+partly bound and never silently coerced.
+
+There are no implicit type conversions anywhere in the v1 dialect (S-19).
+
+---
+
+## 3. Three-valued logic and NULL
+
+Null semantics are three-valued (Kleene) **from rung 1**.
+
+### S-13 · Comparison with NULL yields NULL
+
+For `=`, `<>`, `<`, `<=`, `>`, `>=`: if either operand is `Null`, the result is `Null`. In
+particular `NULL = NULL` is `NULL`, not `true`.
+
+### S-14 · Arithmetic with NULL yields NULL
+
+For `+`, `-`, `*`, `/`, `%`: if either operand is `Null`, the result is `Null` — and the operation
+is not performed, so a `NULL` operand cannot raise a division-by-zero or overflow error.
+
+### S-15 · Boolean connectives are Kleene
+
+| `AND` | T | F | N |     | `OR` | T | F | N |     | `NOT` | |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **T** | T | F | N |     | **T** | T | T | T |     | **T** | F |
+| **F** | F | F | F |     | **F** | T | F | N |     | **F** | T |
+| **N** | N | F | N |     | **N** | T | N | N |     | **N** | N |
+
+Note the two rows that catch people: `F AND N = F` (not `N`), and `T OR N = T` (not `N`).
+
+### S-16 · IS NULL / IS NOT NULL are two-valued
+
+`e IS NULL` and `e IS NOT NULL` always return `true` or `false`, never `Null`. They are the only
+way to observe a null as a boolean.
+
+### S-17 · WHERE and HAVING keep TRUE only
+
+A row survives `WHERE` iff the predicate evaluates to `true`. `false` and `Null` both reject it.
+`HAVING` behaves identically over aggregated rows (S-32).
+
+*Consequence worth stating out loud:* `WHERE x = x` drops every row where `x` is null, and
+`WHERE NOT (x = 1)` is not the complement of `WHERE x = 1` — the null rows fall out of both.
+
+### S-18 · CASE selects the first TRUE branch
+
+`CASE WHEN c1 THEN r1 WHEN c2 THEN r2 ... [ELSE e] END` evaluates conditions in order and yields
+the result of the first condition that is `true`. `false` and `Null` conditions are both skipped.
+If no condition is `true`, the result is `ELSE` if present and `Null` otherwise. All `THEN` and
+`ELSE` expressions must have the same type (S-19); that type is the type of the `CASE`.
+
+Evaluation is **short-circuiting**: expressions after the selected branch are not evaluated, so
+they cannot raise an error. Conditions *are* evaluated in order until one is `true`, so an error
+in an earlier condition is raised.
+
+---
+
+## 4. Scalar expressions
+
+### S-19 · Typing is exact; no implicit conversion
+
+| Expression | Operand types | Result |
+| --- | --- | --- |
+| `+ - * / %` | `Int64, Int64` | `Int64` |
+| `= <> < <= > >=` | `T, T` for `T` in {`Int64`, `Utf8`, `Boolean`} | `Boolean` |
+| `AND OR NOT` | `Boolean` | `Boolean` |
+| `IS [NOT] NULL` | any | `Boolean` (non-null) |
+| `CASE` | conditions `Boolean`; branches all `T` | `T` |
+| column reference | — | the column's type |
+| literal | — | its own type |
+
+Any other combination is a binding error naming the operator and the operand types
+(`TypeMismatch`). There is no `Int64`-to-`Utf8` coercion, no truthiness of integers, no
+string-to-number parsing. `Float64` never appears as an operand or a result (S-3).
+
+### S-20 · Integer overflow is an error, not a wrap
+
+`+`, `-`, `*` are **checked**. An overflow of the `i64` range raises `ArithmeticOverflow` naming
+the operator. Wrapping would be deterministic but wrong; saturating would be deterministic but a
+lie. An error is the only answer that never silently corrupts a number.
+
+### S-21 · Division and modulo by zero are errors
+
+`x / 0` and `x % 0` raise `DivisionByZero`. Integer division truncates toward zero, and `%` takes
+the sign of the dividend (Rust's and C's convention, and Postgres's).
+
+`i64::MIN / -1` and `i64::MIN % -1` overflow and raise `ArithmeticOverflow` (S-20).
+
+### S-22 · Errors abort the query for that epoch
+
+An evaluation error is not a value and does not become a `Null`. It aborts evaluation of the query
+at that epoch and is reported. Errors are deterministic: the same log prefix and the same query
+always produce the same error, or none (I-2).
+
+> **Open question, flagged not hidden.** For a *standing* query, "abort the epoch" is not yet a
+> complete answer — does the query stay registered, get quarantined, or get deregistered? Nothing
+> at rungs 1–3 in C0 needs the answer (there is no registry until C6), so it is not invented here.
+> It is recorded as an open decision in `docs/DECISIONS.md` and must be settled by C5, when
+> queries first arrive through the SQL door.
+
+---
+
+## 5. Relational operators
+
+### S-23 · Scan
+
+`Scan(table, alias)` yields the table's integral at the current epoch (S-6), with the schema's
+columns renamed to `alias.column`. Weights pass through unchanged and are non-negative (S-5).
+
+### S-24 · WHERE preserves weights
+
+Filtering keeps entries whose predicate is `true` (S-17) with their weights **unchanged**. It
+never splits, merges, or resigns a weight. Filter is linear: it treats a weight `-1` entry exactly
+as it treats a weight `+1` entry (I-5), because it never looks at the weight at all.
+
+### S-25 · Projection preserves multiplicity and may merge rows
+
+Projection evaluates its expressions per entry and keeps the entry's weight. Because a projection
+can drop distinguishing columns, two distinct input rows can become the same output row; the
+result is then **consolidated** (S-4), summing their weights. So a table holding `(1,'a')` and
+`(1,'b')` each at weight 1 projects on the first column to `(1)` at weight **2**.
+
+This is plain SQL multiset semantics: `SELECT` without `DISTINCT` preserves duplicates.
+De-duplication is `DISTINCT`, which is rung 4 and not available here.
+
+### S-26 · INNER equi-join multiplies weights
+
+`Join(left, right, ON [(l1,r1), (l2,r2), ...])` pairs an entry from each side when **every** key
+pair compares equal by S-13 — that is, when each `li = ri` evaluates to `true`. The output entry's
+weight is the **product** of the two input weights.
+
+Consequences, all of them intended:
+
+- **A null key never joins.** If any `li` or `ri` is `Null`, the comparison is `Null`, not `true`,
+  so the pair does not match (S-13). A row with a null join key contributes to no output row.
+- **Multiplicities multiply.** Three copies of a left row against two matching right rows produce
+  six copies of the joined row. This is what makes the join bilinear and is what
+  `ΔA⋈B + A⋈ΔB + ΔA⋈ΔB` is computing (D-3); the oracle gets it for free by multiplying, and the
+  engine will have to earn it in C2.
+- **Output schema** is the left schema followed by the right schema, with columns keeping their
+  `alias.column` names. Since aliases are unique within a query, there are no collisions; a
+  repeated alias is refused (`DuplicateAlias`).
+- At least one key pair is required. A join with no key pairs (a cross join) is refused
+  (`CrossJoinNotSupported`) — it is not in the rung-2 dialect.
+
+---
+
+## 6. Aggregation
+
+### S-27 · GROUP BY erases the input schema
+
+The output of a GROUP BY is: the group-key columns, in declared order, followed by the aggregate
+columns, in declared order — all under their declared output names (S-11), referenced unqualified
+thereafter. Input columns are no longer reachable. There is no "bare column" rule to violate,
+because a column that is not a group key simply cannot be named.
+
+**Each group produces exactly one output row, with weight 1.** An aggregate result is a statement
+about a group, and a group either exists or does not; it has no multiplicity.
+
+### S-28 · Grouping treats NULLs as equal to each other
+
+Two rows are in the same group iff their key values are **not distinct** — i.e. equal, or both
+`Null`, position by position. `Null` forms a group like any other value.
+
+This is deliberately *not* S-13. Comparison in `WHERE`/`ON` is three-valued and `NULL = NULL` is
+unknown; grouping is an equivalence relation and must be reflexive, so it uses "not distinct
+from". SQL makes the same split, and it is the single most common source of confusion in this
+area, so: **`ON` uses `=` (nulls never match); `GROUP BY` uses "not distinct" (nulls group
+together).**
+
+### S-29 · A group exists iff its total weight is positive; a drained group vanishes
+
+The group's total weight is the sum of the weights of its member entries. Because table integrals
+are non-negative (S-5), that sum is ≥ 0, and:
+
+- total weight > 0 → the group exists and emits exactly one row (weight 1);
+- total weight = 0 → **the group does not exist and emits nothing.**
+
+A group drained to zero rows produces **no output row at all** — not a row of zeroes, not
+`(key, 0)`, not `(key, NULL)`. The row disappears. (This is the C3 pitfall, decided here in C0 by
+the oracle, as §5.1 requires.)
+
+### S-30 · Aggregates respect weights and ignore NULLs
+
+Let a group contain entries `(row_i, w_i)` with `w_i ≥ 1`, and let `x_i` be the aggregated
+expression evaluated on `row_i`. Let `P` be the entries where `x_i` is **not** null.
+
+| Aggregate | Definition | Result type | Empty `P` |
+| --- | --- | --- | --- |
+| `COUNT(*)` | `Σ w_i` over all entries | `Int64` | n/a — group exists, so ≥ 1 |
+| `COUNT(x)` | `Σ w_i` over `P` | `Int64` | **`0`**, never null |
+| `SUM(x)` | `Σ w_i · x_i` over `P` | `Int64` | **`Null`** |
+| `MIN(x)` | least `x_i` over `P` by S-7 | type of `x` | **`Null`** |
+| `MAX(x)` | greatest `x_i` over `P` by S-7 | type of `x` | **`Null`** |
+| `AVG(x)` | see S-31 | `Float64` | **`Null`** |
+
+- `COUNT` is the only aggregate that never returns `Null`. `COUNT(x)` of an all-null group is
+  `0`; `SUM` of an all-null group is `Null`. That asymmetry is SQL's, and it is intentional.
+- **Weights are multiplicities, so they count.** `COUNT(*)` of a single row at weight 3 is `3`;
+  `SUM(x)` of that row is `3·x`. `MIN`/`MAX` are unaffected by multiplicity — a value present
+  once and a value present three times are equally present — but a value must be present
+  (weight ≥ 1) to be considered.
+- `SUM` and `AVG` accept only `Int64` (S-3). `MIN`/`MAX` accept `Int64`, `Utf8`, `Boolean`.
+  `COUNT(x)` accepts any type. `COUNT(*)` takes no argument.
+- **`SUM` accumulates in `i128` and must land in `Int64`.** If the exact sum does not fit in
+  `i64`, the query raises `AggregateOverflow` (S-20's rule, applied to aggregation). The
+  intermediate width means a sum that transits through large partial values but ends in range is
+  still correct, which is precisely the property an incremental `SUM` under retraction needs.
+
+### S-31 · AVG is one division of two exact integers
+
+`AVG(x) = (SUM(x) as f64) / (COUNT(x) as f64)`, computed as a **single** IEEE-754 division at emit
+time, from the exact `i64` sum and the exact `i64` count. It is never accumulated as a float and
+never computed incrementally as a float.
+
+`COUNT(x)` is `0` only when `P` is empty, in which case `AVG` is `Null` (S-30) and the division is
+not performed — so `AVG` never divides by zero and never produces `NaN` or an infinity.
+
+The `i64`-to-`f64` conversions are exact for magnitudes below 2⁵³ and round-to-nearest-even above
+it; both implementations perform the identical two conversions and the identical division, so both
+produce the identical bits. That is what makes `AVG` compatible with I-1 while `SUM(float)` is not.
+
+### S-32 · HAVING filters aggregated rows
+
+`HAVING` is evaluated after aggregation, over the GROUP BY output schema (S-27), and keeps rows
+where the predicate is `true` (S-17). It may reference group keys and aggregate outputs by their
+declared names, and nothing else. It never re-opens the input rows, so there are no aggregates
+inside `HAVING` beyond the ones already declared — an aggregate call in a `HAVING` expression is
+refused (`AggregateInHaving`); declare it as an output and reference it by name.
+
+### S-33 · Aggregation without GROUP BY is not in rungs 1–3
+
+A query with aggregates and no group keys (`SELECT COUNT(*) FROM t` — the "grand total" shape) has
+a genuine edge case: over an empty input, SQL returns one row (`0`), whereas S-29 would produce no
+group and therefore no row. Both answers are defensible and the difference is exactly the kind of
+thing that must be *decided*, not stumbled into.
+
+It is **not decided here**, because it is not needed here: rung 3 is "GROUP BY + the five
+aggregates + HAVING", and grand-total aggregation is a distinct shape. A group list with zero keys
+is refused (`EmptyGroupKeys`). This is recorded as an open decision in `docs/DECISIONS.md` and must
+be settled before the SQL binder can accept `SELECT COUNT(*) FROM t` in C5.
+
+---
+
+## 7. What this document deliberately does not define
+
+Refused by name, and the name is the point:
+
+| Construct | Refusal | Arrives |
+| --- | --- | --- |
+| `DISTINCT` | `NotInDialect("DISTINCT")` | rung 4 |
+| `UNION ALL` | `NotInDialect("UNION ALL")` | rung 4 |
+| `ORDER BY` / `LIMIT` | `NotInDialect("ORDER BY")` | rung 4, at read time (D-7) |
+| `LEFT`/`RIGHT`/`FULL JOIN` | `NotInDialect("OUTER JOIN")` | rung 5 |
+| cross join / no join keys | `CrossJoinNotSupported` | rung 5 evaluation |
+| subqueries | `NotInDialect("subquery")` | rung 5 where decorrelatable |
+| grand-total aggregation | `EmptyGroupKeys` | open decision, by C5 (S-33) |
+| window functions | `NotInDialect(...)` | post-v1, by evidence of need (§8) |
+| user-defined functions | `NotInDialect(...)` | post-v1 (§8) |
+| recursive / iterative queries | `NotInDialect(...)` | out of scope for v1 (D-3) |
+| `Float64` columns, float arithmetic | `NotInDialect("FLOAT")` | open decision — decimals (S-3) |
+| collations, locale-aware comparison | `NotInDialect("COLLATE")` | post-v1 |
+
+---
+
+## 8. Index of rules
+
+S-1 values · S-2 types and schemas · S-3 Float64 is result-only · S-4 rows, Z-sets, weights ·
+S-5 non-negative integrals · S-6 epochs · S-7 total order on values · S-8 canonical form and
+answer equality · S-9 query shape · S-10 column references · S-11 explicit output names ·
+S-12 binding and named refusals · S-13 comparison with NULL · S-14 arithmetic with NULL ·
+S-15 Kleene connectives · S-16 IS NULL · S-17 WHERE keeps TRUE only · S-18 CASE · S-19 exact
+typing · S-20 overflow is an error · S-21 division by zero · S-22 errors abort the epoch ·
+S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-26 join multiplies
+weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
+groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·
+S-32 HAVING · S-33 grand-total aggregation is undecided.
