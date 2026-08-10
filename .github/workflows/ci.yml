@@ -1,0 +1,112 @@
+name: CI
+
+# Four jobs, all of which must be green for a sprint to be done (ARCHITECTURE.md §6 C0):
+# fmt, clippy -D warnings, test, and a job that proves the suite needs no network.
+#
+# "Green locally" is not done. Green here is done.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail rather than hang if the network is unexpectedly involved.
+  CARGO_NET_RETRY: 2
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets so tests and benches are linted too: the workspace denies unwrap/expect/
+      # panic in library code, and the allowances that re-enable them in tests must be explicit.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
+      # The differential gate is the one that matters; run it again alone so that its result is
+      # legible in the job log rather than buried among the unit tests.
+      - name: The C0 differential gate (1,000 oracle-vs-oracle scenarios)
+        run: cargo test -p current-differential --locked --test oracle_vs_oracle -- --nocapture
+
+  no-network:
+    name: no-network
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The only step permitted to reach the network. Everything after it runs with the network
+      # removed, so anything that tries to fetch, phone home, or reach a fixture server fails.
+      - name: Fetch dependencies (the only networked step)
+        run: cargo fetch --locked
+
+      - name: Build the suite offline
+        run: cargo test --workspace --all-features --locked --offline --no-run
+
+      # A no-network job that silently still has network proves nothing, so the sandbox is
+      # verified before it is trusted: unshare must work, and inside it a connection must fail.
+      - name: Prove the sandbox really has no network
+        run: |
+          set -euo pipefail
+          if ! unshare -rn true; then
+            echo "::error::unshare -rn is unavailable on this runner; this job cannot prove the" \
+                 "absence of network and must not pass by default"
+            exit 1
+          fi
+          if unshare -rn timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>/dev/null; then
+            echo "::error::a TCP connection succeeded inside the sandbox; the no-network job" \
+                 "would be measuring nothing"
+            exit 1
+          fi
+          echo "sandbox verified: unshare works and outbound TCP fails inside it"
+
+      - name: Run the whole suite with no network
+        run: unshare -rn cargo test --workspace --all-features --locked --offline
+
+  # A single required check, so branch protection has one name to point at rather than four that
+  # drift as jobs are added.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test, no-network]
+    if: always()
+    steps:
+      - name: Fail if any job did not succeed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::at least one CI job did not succeed"
+            exit 1
+          fi
+          echo "all CI jobs succeeded"

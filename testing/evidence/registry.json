@@ -1,0 +1,25 @@
+{
+  "$comment": [
+    "THE LEDGER (ARCHITECTURE.md §1, I-10).",
+    "Every tuned constant in the engine, with the benchmark artifact that justifies it.",
+    "A constant not in this ledger may not steer behavior.",
+    "",
+    "It is empty because nothing is tuned yet. C0 built the oracle and the harness; there is no",
+    "engine, no cache, no batch size, no threshold, and no benchmark. The first entries arrive",
+    "when the first constant does — RocksDB block cache and bloom filters in C8, consolidate()",
+    "tuning in C10 — and each one arrives with its receipt or not at all.",
+    "",
+    "An entry has the shape:",
+    "  {",
+    "    \"name\":       \"the constant, as it appears in code\",",
+    "    \"value\":       <the value>,",
+    "    \"location\":    \"crate/path.rs:line\",",
+    "    \"steers\":      \"what behaviour this changes\",",
+    "    \"artifact\":    \"testing/evidence/<benchmark>.json — committed, reproducible\",",
+    "    \"measured_on\": \"the machine and configuration the artifact was produced on\",",
+    "    \"sprint\":      \"CN\"",
+    "  }"
+  ],
+  "schema_version": 1,
+  "constants": []
+}
