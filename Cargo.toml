@@ -4,6 +4,8 @@ members = [
     "crates/current-zset",
     "crates/current-plan",
     "crates/current-oracle",
+    "crates/current-ops",
+    "crates/current-circuit",
     "testing/differential",
 ]
 
@@ -19,6 +21,8 @@ publish = false
 current-zset = { path = "crates/current-zset" }
 current-plan = { path = "crates/current-plan" }
 current-oracle = { path = "crates/current-oracle" }
+current-ops = { path = "crates/current-ops" }
+current-circuit = { path = "crates/current-circuit" }
 
 arrow-array = { version = "59", default-features = false }
 arrow-buffer = { version = "59", default-features = false }

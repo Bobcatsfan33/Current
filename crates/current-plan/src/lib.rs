@@ -35,7 +35,7 @@ pub mod error;
 pub mod eval;
 pub mod plan;
 
-pub use bind::{bind, bind_source, type_of, Bound, Catalog, Naming, Scope};
+pub use bind::{bind, bind_source, projection_schema, type_of, Bound, Catalog, Naming, Scope};
 pub use error::{PlanError, Result};
 pub use eval::{eval, is_true};
 pub use plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};

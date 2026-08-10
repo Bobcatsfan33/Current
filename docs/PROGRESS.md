@@ -6,8 +6,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | Sprint | Status |
 | --- | --- |
 | **C0** — the oracle, the harness, and the rules | **complete; exit gate green in CI** |
-| C1 — linear operators + the first real circuit | not started |
-| C2 … C13 | not started |
+| **C1** — linear operators + the first real circuit | **complete; exit gate green in CI** |
+| C2 — join | not started |
+| C3 … C13 | not started |
 
 ---
 
@@ -27,7 +28,8 @@ exists.* That is what happened: there is no engine in this repository, deliberat
 | Property tests for Z-set algebra pass | `crates/current-zset/tests/properties.rs` | 13 property tests |
 | A seeded scenario is reproducible byte-for-byte from its seed | `a_seed_reproduces_its_scenario_byte_for_byte`, `a_seed_reproduces_its_run_byte_for_byte` | byte-identical scenario *and* run |
 
-**122 tests across 11 binaries**, zero ignored, zero skipped, zero flaky.
+**122 tests**, zero ignored, zero skipped, zero flaky. (The workspace total is now 152; the
+extra 30 arrived with C1 and the refactor that preceded it.)
 
 ### What is proven, and by which test
 
@@ -168,3 +170,167 @@ shared type — most naturally in `current-zset`, since it is the delta represen
 crate already depends on it.
 
 Per the sprint protocol in `CLAUDE.md`, **C1 does not begin in the session that finished C0.**
+
+---
+
+## C1 — linear operators and the first real circuit
+
+**Objective (§6):** the smallest true incremental engine. There is now an engine: it maintains an
+answer from deltas and never looks at the whole input, and it is checked against the oracle at
+every sealed epoch.
+
+### The exit gate
+
+§6 C1 names two conditions. Both are met.
+
+| Gate condition | Proven by | Result |
+| --- | --- | --- |
+| Differential harness green, engine-vs-oracle, over randomized filter/project scenarios **including retractions** | `engine_vs_oracle_over_a_thousand_filter_project_scenarios` | 1,118 rung-1 scenarios drawn from 4,400 seeds, 5,187 epochs, 6,305 answer comparisons, **0 divergences** |
+| I-2 gate: two runs of the same scenario produce byte-identical **state and answers** | `i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers` | 400 scenarios, identical fingerprints and answers, including from a scenario regenerated from its seed |
+
+The "including retractions" clause is measured on the population the gate actually ran, not on the
+generator as a whole: of those 1,118 scenarios, **894 contain a retraction, 312 retract in epoch
+one, and 863 use a weight above 1** (`the_gate_population_is_full_of_retractions`). A family filter
+that quietly selected a corner without retractions would fail that test.
+
+**152 tests across the workspace**, zero ignored, zero skipped, zero flaky (two consecutive full
+runs, identical results).
+
+### This is the first time I-1 has meant anything
+
+C0's harness compared the oracle to itself, which tested the harness. C1 puts two genuinely
+different implementations on the two sides:
+
+- the **circuit** sees only what changed, pushes it through stateless operators, and folds the
+  output delta into a maintained integral — reading the answer is a lookup;
+- the **oracle** replays the entire log from epoch 1 and recomputes from scratch, every time.
+
+They agree byte for byte at every sealed epoch over 6,305 comparisons.
+
+**And the gate has teeth — checked, not assumed.** Two deliberate mutations were introduced and
+the gate caught both before being reverted:
+
+| Mutation | Caught |
+| --- | --- |
+| Filter admits rows whose predicate is `NULL` (the classic S-17 bug) | seed 11, epoch 1 |
+| Result store overwrites instead of accumulating — an error only a multi-epoch history reveals | seed 21, epoch 1 |
+
+Worth recording alongside that: under both mutations the **I-2 test still passed**. A deterministic
+bug is still deterministic. I-2 proves reproducibility, never correctness; only I-1 does that, and
+the two gates are not substitutes.
+
+### What is proven, and by which test
+
+**The operators** — `crates/current-ops/`
+
+| Claim | Test |
+| --- | --- |
+| Filter keeps TRUE only, weights untouched (S-17, S-24) | the differential gate; `a_hand_built_circuit_maintains_its_answer_from_deltas` |
+| Projection merges rows and sums weights (S-25) | `a_hand_built_circuit_maintains_its_answer_from_deltas` |
+| A non-Boolean predicate is refused at construction, not at data time (S-17) | `a_non_boolean_predicate_is_refused_at_construction` |
+| **Linear operators declare and hold no state** — §6 C1's pitfall, as an assertion | `linear_operators_declare_and_hold_no_state`, plus the runtime check in every step |
+| Projection's output schema comes from the shared binder, so it cannot drift from the oracle's (S-11, D-14) | `Project::new` calls `current_plan::projection_schema`; the gate would show any drift as a schema mismatch |
+
+**The circuit** — `crates/current-circuit/`
+
+| Claim | Test |
+| --- | --- |
+| A hand-built circuit maintains its answer from deltas across epochs, including retractions | `a_hand_built_circuit_maintains_its_answer_from_deltas` |
+| A row inserted and retracted in one epoch leaves no trace | `same_epoch_churn_leaves_no_trace` |
+| A drained row leaves no zero-weight tombstone | `a_row_retracted_to_zero_leaves_no_tombstone` |
+| An empty epoch advances the clock and nothing else (S-6, I-3) | `an_empty_epoch_advances_the_clock_and_nothing_else` |
+| A circuit ignores deltas for tables it does not read | `deltas_for_a_table_this_circuit_does_not_read_are_ignored` |
+| Wiring out of dependency order is refused, which is what makes the schedule deterministic (I-2) | `the_builder_refuses_wiring_that_is_not_in_dependency_order` |
+| Arity is checked at wiring time, not discovered at step time | `the_builder_refuses_an_operator_wired_to_the_wrong_number_of_inputs` |
+| **A failed step advances nothing** — the epoch and the result store are exactly where they were (I-3) | `an_evaluation_error_aborts_the_step_without_advancing_the_epoch` |
+| Result store: integral maintained by addition, order-independent, overflow refused not wrapped | seven tests in `result_store.rs` |
+| The state fingerprint is stable and reports wiring, declarations, and store | `the_state_fingerprint_is_stable_and_reports_what_is_held` |
+
+**The engine, against the oracle** — `testing/differential/tests/c1_engine_vs_oracle.rs`
+
+| Claim | Test |
+| --- | --- |
+| **I-1** over 1,118 randomized rung-1 scenarios, every sealed epoch | `engine_vs_oracle_over_a_thousand_filter_project_scenarios` |
+| **I-2** byte-identical state and answers across runs and across regeneration from seed | `i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers` |
+| A one-shot query is the degenerate standing query (§0): the whole history as one epoch gives the same answer as epoch-by-epoch | `feeding_the_whole_history_as_one_epoch_gives_the_same_answer` |
+| What the engine cannot run it refuses **by name**, naming the sprint that brings it | `the_engine_refuses_beyond_rung_one_and_names_the_sprint` |
+| The harness can still fail against a real circuit, not only against the oracle | `the_gate_would_catch_a_wrong_circuit` (150 of 150) |
+
+**I-9, at the level C1 has.** Every operator declares a `StateBound` and reports its actual state
+size, and `Circuit::step` checks the declaration against the report after *every* step. In C1 every
+declaration is `Stateless` and every report is zero, so the check is the executable form of §6 C1's
+pitfall rather than a warning in a comment. Real bounds — and the accounting that checks them —
+arrive with the join in C2, which is the first sprint with state to account for.
+
+### What C1 does **not** prove
+
+- **Nothing about join, aggregation, or distinct.** The engine refuses all three by name. Of the
+  4,400 seeds swept, 3,282 were skipped as outside rung 1; that number is printed by the gate
+  rather than hidden, because "1,000 scenarios passed" and "three quarters were not attempted" are
+  the same sentence.
+- **The hard part of incrementality is still ahead.** Filter and project are *linear*:
+  `f(a + b) = f(a) + f(b)`, so the incremental form is a one-line consequence rather than a
+  theorem. C1 proves the machinery — wiring, scheduling, epoch discipline, result stores, state
+  accounting — before C2 introduces an operator where the equality has three terms and one of them
+  is the one everybody forgets.
+- **Errors are not settled, and the gate stays away from them.** C1 found that the oracle and the
+  circuit disagree about an evaluation error's *lifetime*: the oracle recomputes over the integral
+  so a bad row raises forever, while the circuit sees each row once so it raises once. Neither is
+  wrong; nothing has decided what a standing query does with an error. Recorded under **Q-2** in
+  `docs/DECISIONS.md`, and the gate asserts that zero scenarios raised, so it never silently
+  depends on the undecided part.
+- **Shared scalar code is not covered by I-1.** The oracle and the engine call the same expression
+  evaluator (D-14), so a bug inside it produces the same wrong answer on both sides and the harness
+  cannot see it. `current-plan`'s own unit tests pin that code to `docs/SEMANTICS.md` directly.
+- **No durability, no sharing, no SQL, no network.** C4, C6, C5, C9. Circuits are hand-built by
+  design (§6 C1); the incrementalizer that compiles a plan into one is C5.
+- **No performance claim.** The engine has never been benchmarked and no artifact exists. Both
+  implementations are knowingly slow: operators materialise rows out of the columnar batch, and the
+  oracle replays the whole log per question. `testing/evidence/registry.json`'s engine-constant list
+  is still empty, and `no_engine_constant_steers_behaviour_without_a_receipt` fails if that changes
+  without a receipt.
+
+### The pre-C1 refactor
+
+Before any engine code, three things from review (one commit, no behaviour change):
+
+- **D-14 · `current-plan`.** The plan IR, the binder, and the scalar expression library left
+  `current-oracle` for a neutral crate — recorded in `docs/DECISIONS.md` *before* the move, because
+  it extends §5's crate map. From C1 there are two implementations of the query surface and neither
+  may own the definition of what a query is.
+- **One delta type.** `current-zset::EpochDeltas` replaced the harness's `EpochInput` and the
+  oracle's private copy. This corrected a comment in `engine.rs` that asserted the opposite of what
+  the file did, and a claim in C0's section of this document that repeated it. Both now say what is
+  true, and say that they were wrong.
+- **Ledger receipts (I-10).** The scenario generator's nine tuned constants are in
+  `testing/evidence/registry.json` with the measured number that justifies each, backed by
+  `c0-generator-coverage.json` — regenerable by a committed binary and checked by
+  `the_committed_coverage_artifact_still_matches_the_generator`, so the receipt cannot go stale
+  quietly.
+
+### What C2 needs
+
+C2 is *join* — the first bilinear operator, and §6 calls it the hardest correctness class in the
+engine. What C1 leaves it:
+
+- **The `Operator` trait already fits it.** `step(&[&ZSetBatch])` takes a slice, so a binary
+  operator needs no trait change; `StateBound::ProportionalToInputs { inputs: ["left", "right"] }`
+  is already the vocabulary for declaring O(|A| + |B|), and `Circuit::step` already calls the
+  check. What C2 must add is the *accounting* — `check_state_declarations` currently accepts any
+  actual size for a non-`Stateless` declaration, because nothing declares one yet. That is the one
+  place in the C1 code that is deliberately unfinished, and it is named here rather than left to be
+  discovered.
+- **The wiring is already a DAG.** `CircuitBuilder::add` takes a vector of inputs and validates
+  arity and ordering, so a two-input node needs no builder change.
+- **The scenarios exist.** `Family::Join` and `Family::JoinAggregate` are already generated —
+  3,282 of the 4,400 seeds C1 skipped are mostly these. C2's gate widens `CircuitEngine::claims`
+  to include `Family::Join` and the same sweep starts exercising it.
+- **The delta-delta term needs its own scenario.** §6 C2's pitfall is that `ΔA⋈ΔB` is the term
+  every implementer forgets, and the gate must have a scenario that fails if it is missing — both
+  sides inserting matching rows in the *same* epoch. The generator produces multi-table epochs
+  today, but nothing yet *isolates* that case or asserts it occurred. Writing that scenario family
+  first, before the operator, is C2's first task.
+- **Join weights multiply, and the oracle already says so.** `s26_join_multiplies_weights` and
+  `s26_a_null_join_key_never_matches_even_another_null` pin the semantics C2's operator must match.
+
+Per the sprint protocol in `CLAUDE.md`, **C2 does not begin in the session that finished C1.**

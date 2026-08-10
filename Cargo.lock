@@ -158,14 +158,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "current-circuit"
+version = "0.0.0"
+dependencies = [
+ "current-ops",
+ "current-plan",
+ "current-zset",
+ "thiserror",
+]
+
+[[package]]
 name = "current-differential"
 version = "0.0.0"
 dependencies = [
+ "current-circuit",
+ "current-ops",
  "current-oracle",
  "current-plan",
  "current-zset",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
+ "thiserror",
+]
+
+[[package]]
+name = "current-ops"
+version = "0.0.0"
+dependencies = [
+ "current-plan",
+ "current-zset",
  "thiserror",
 ]
 

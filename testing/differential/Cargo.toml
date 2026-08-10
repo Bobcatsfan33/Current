@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 current-zset.workspace = true
 current-plan.workspace = true
+current-ops.workspace = true
+current-circuit.workspace = true
 current-oracle.workspace = true
 rand_core.workspace = true
 rand_chacha.workspace = true

@@ -156,6 +156,31 @@ answer, or get deregistered? Each choice has different implications for I-3 (wha
 and for the memo (I-8) when the failing subplan is shared. Nothing in C0 needs the answer, so none
 is invented.
 
+**What C1 found, which sharpens the question.** With a real incremental engine next to the oracle,
+the two disagree about an error's *lifetime*, and neither is wrong:
+
+- The **oracle** recomputes over the whole integral at every epoch, so a row that makes an
+  expression raise keeps making it raise — at that epoch and every epoch afterwards, until the row
+  is retracted. The error is a property of the *state*.
+- The **circuit** sees each row once, in the delta that carried it. It raises at that epoch and
+  then, if no later delta touches the row, answers normally again. The error is a property of the
+  *change*.
+
+So "an evaluation error aborts the query for that epoch" is not one behaviour but two, and I-1
+cannot hold across an erroring scenario until the question is settled. Settling it means choosing
+what an error *is*: a fact about the data now in the table (oracle-shaped, which an incremental
+engine would have to maintain deliberately — remembering poisoned rows is state, and state needs a
+declaration under I-9), or a fact about a change that passed through (circuit-shaped, which makes
+an answer's validity depend on when you asked).
+
+C1 does not decide it, and keeps the gate away from it: the scenario generator emits division only
+by non-zero literals over a value domain far too small to overflow, so rung-1 expressions cannot
+raise, and the gate asserts that zero scenarios produced an error rather than trusting that
+property to stay true. The behaviour that does exist is pinned by
+`an_evaluation_error_aborts_the_step_without_advancing_the_epoch` in `current-circuit`: a failed
+step leaves the epoch and the result store exactly where they were, so nothing is half-applied
+(I-3), whatever the eventual policy turns out to be.
+
 ### Q-3 · Grand-total aggregation over an empty input
 
 *Raised: C0 (S-33). Must be settled by: C5, before the binder accepts `SELECT COUNT(*) FROM t`.*

@@ -211,6 +211,20 @@ fn compare_answers<L: EngineUnderTest, R: EngineUnderTest>(
 pub fn sweep<L: EngineUnderTest, R: EngineUnderTest>(
     seeds: impl IntoIterator<Item = u64>,
 ) -> Result<SweepReport, Box<Divergence>> {
+    sweep_matching::<L, R>(seeds, |_| true)
+}
+
+/// Sweep only the scenarios an implementation is expected to handle.
+///
+/// An engine that supports part of the dialect — C1's circuit does rung 1 and refuses the rest —
+/// must be swept over the part it claims, or every skipped scenario would register as a build
+/// divergence and drown the real signal. `accept` states the claim; scenarios outside it are
+/// counted as skipped, and the count is reported rather than discarded, so "1,000 scenarios
+/// passed" can always be read next to "and this many were not attempted".
+pub fn sweep_matching<L: EngineUnderTest, R: EngineUnderTest>(
+    seeds: impl IntoIterator<Item = u64>,
+    accept: impl Fn(&Scenario) -> bool,
+) -> Result<SweepReport, Box<Divergence>> {
     let mut report = SweepReport::default();
     for seed in seeds {
         let scenario = Scenario::generate(seed).map_err(|e| {
@@ -225,8 +239,18 @@ pub fn sweep<L: EngineUnderTest, R: EngineUnderTest>(
                 kind: DivergenceKind::Build,
             })
         })?;
+        report.considered += 1;
+        if !accept(&scenario) {
+            report.skipped += 1;
+            continue;
+        }
         let run = compare::<L, R>(&scenario)?;
         report.scenarios += 1;
+        report.error_answers += run
+            .answers
+            .iter()
+            .filter(|a| a.starts_with("ERROR"))
+            .count();
         report.epochs += run.epochs;
         report.comparisons += run.comparisons;
         if scenario.is_empty_input() {
@@ -254,11 +278,19 @@ pub fn sweep<L: EngineUnderTest, R: EngineUnderTest>(
 /// would be a suite that proves nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
+    /// Seeds looked at, including those `accept` rejected.
+    pub considered: usize,
+    /// Seeds `accept` rejected — outside the implementation's claimed dialect.
+    pub skipped: usize,
     pub scenarios: usize,
     pub epochs: usize,
     pub comparisons: usize,
     pub empty_input_scenarios: usize,
     pub scenarios_with_an_empty_epoch: usize,
+    /// Comparisons where *both* sides raised the same error. Counted because an error is a
+    /// legitimate agreement but a useless one, and a suite that quietly filled with them would
+    /// look green while testing nothing.
+    pub error_answers: usize,
     pub operations: Vec<crate::scenario::Operation>,
     pub families: Vec<crate::scenario::Family>,
 }

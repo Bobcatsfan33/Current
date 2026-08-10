@@ -114,14 +114,7 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<Bound> {
 
     let output_schema = match &query.project {
         None => grouped_schema.clone(),
-        Some(items) => {
-            let mut fields = Vec::with_capacity(items.len());
-            for item in items {
-                let ty = type_of(&item.value, grouped_scope)?;
-                fields.push(output_field(&item.name, ty));
-            }
-            build_output_schema(fields)?
-        }
+        Some(items) => projection_schema(grouped_scope, items)?,
     };
 
     Ok(Bound {
@@ -202,6 +195,22 @@ fn bind_group_by(group_by: &GroupBy, input: Scope<'_>) -> Result<Schema> {
     build_output_schema(fields)
 }
 
+/// The schema a projection produces over `scope` (S-11): the declared names, the types the
+/// expressions have, every column nullable.
+///
+/// Public because the `Project` operator in `current-ops` needs exactly this schema and must not
+/// compute it a second way. Two implementations of S-11 could disagree, and a disagreement about
+/// an *answer's schema* is a disagreement about the answer (S-8) — it would surface as an I-1
+/// failure whose cause is two copies of one rule, not a bug in either engine.
+pub fn projection_schema(scope: Scope<'_>, items: &[Named<Expr>]) -> Result<Schema> {
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        let ty = type_of(&item.value, scope)?;
+        fields.push(output_field(&item.name, ty));
+    }
+    build_output_schema(fields)
+}
+
 /// The result type of an aggregate, having checked that it accepts its argument's type (S-30).
 pub fn aggregate_result_type(func: &AggFunc, scope: Scope<'_>) -> Result<DataType> {
     let name = func.name();
@@ -234,7 +243,7 @@ fn output_field(name: &str, ty: DataType) -> Field {
 }
 
 fn build_output_schema(fields: Vec<Field>) -> Result<Schema> {
-    // Translate the Z-set layer's duplicate-name error into the oracle's, which names the rule.
+    // Translate the Z-set layer's duplicate-name error into one that names the rule.
     for (i, f) in fields.iter().enumerate() {
         if fields
             .get(..i)

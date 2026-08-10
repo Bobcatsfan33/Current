@@ -19,19 +19,22 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C0 in progress
+## Status: Sprint C1 complete
 
-Current is at the very beginning. Sprints are numbered C0–C13 and a sprint is complete only when
-its exit gate is green in CI. There are no dates.
+Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
+exit gate is green in CI. There are no dates.
 
-**What exists today:** the correctness machinery, deliberately built before any engine code —
-the Z-set algebra (`current-zset`), the naive reference engine (`current-oracle`), and the
-differential harness that will hold every future line of engine code to the oracle's answers.
+**What exists today:** the correctness machinery (C0) and the smallest true incremental engine
+(C1). A query over one table, with a `WHERE` and a projection, compiles to a circuit that
+maintains its answer from deltas and never re-reads the input; every answer it gives is checked
+against a from-scratch recomputation at every sealed epoch, over ~1,100 randomized scenarios full
+of retractions.
 
-**What does not exist yet:** the engine. There are no operators, no circuits, no scheduler, no
-SQL frontend, no server, no durability, and no persistence. Nothing here is usable as a database
-today, and nothing here is fast — `current-oracle` is *deliberately* slow, because its job is to
-be obviously correct, not quick.
+**What does not exist yet:** most of the engine. No join (C2), no aggregation (C3), no durability
+(C4), no SQL (C5) — circuits are hand-built — no shared circuitry (C6), no server (C9). Nothing
+here is usable as a database today, and nothing here is fast: the operators materialise rows out
+of the columnar batch, and `current-oracle` is *deliberately* slow, because its job is to be
+obviously correct, not quick.
 
 **Numbers we publish:** none. Per invariant I-10, no performance claim is made without a
 committed, reproducible benchmark artifact, and no such artifact exists yet. When they exist
@@ -64,11 +67,17 @@ from scratch, every time, in CI.
 
 ```
 crates/current-zset/     Z-set batches over Arrow; weight algebra; consolidation
+crates/current-plan/     the logical plan, the binder, the scalar expression library
 crates/current-oracle/   the naive reference engine — the spec, and the arbiter of disputes
-testing/differential/    the oracle harness: seeded scenarios, oracle vs engine, every epoch
-testing/evidence/        registry.json — the tuned-constant ledger (empty; nothing is tuned yet)
+crates/current-ops/      circuit operators: filter and project so far
+crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
+testing/differential/    the oracle harness: seeded scenarios, engine vs oracle, every epoch
+testing/evidence/        the ledger, and the artifacts its entries cite
 docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 ```
+
+`current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
+recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
 Crates named in §5 that do not appear above have not been written yet.
 

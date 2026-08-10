@@ -43,6 +43,7 @@
 //! # }
 //! ```
 
+pub mod circuit_engine;
 pub mod coverage;
 pub mod engine;
 pub mod harness;
@@ -50,8 +51,11 @@ pub mod oracle_engine;
 pub mod rng;
 pub mod scenario;
 
+pub use circuit_engine::CircuitEngine;
 pub use engine::EngineUnderTest;
-pub use harness::{compare, sweep, Divergence, DivergenceKind, Report, SweepReport};
+pub use harness::{
+    compare, sweep, sweep_matching, Divergence, DivergenceKind, Report, SweepReport,
+};
 pub use oracle_engine::{OracleEngine, SaboteurEngine};
 pub use rng::Rng;
 pub use scenario::{Family, Operation, Scenario};
