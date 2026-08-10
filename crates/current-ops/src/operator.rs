@@ -2,9 +2,63 @@
 
 use std::fmt;
 
-use current_zset::{Schema, ZSetBatch};
+use current_plan::PlanError;
+use current_zset::{DataType, Field, Row, Schema, Value, ZSetBatch};
 
 use crate::error::{OpError, Result};
+
+/// The column name of the error stream.
+pub const ERROR_COLUMN: &str = "error";
+
+/// The schema of every operator's error stream: one non-null `Utf8` column holding the message.
+///
+/// An error's identity is its message (S-22b), so a stream of messages is all the answer needs: the
+/// live errors are a Z-set like any other, weights and all, and the least message is simply the
+/// first row of its canonical form (S-22c).
+pub fn error_schema() -> Result<Schema> {
+    Ok(Schema::new(vec![Field::not_null(
+        ERROR_COLUMN,
+        DataType::Utf8,
+    )])?)
+}
+
+/// One entry of the error stream: the message, at the weight of the row that raised it.
+///
+/// Carrying the *row's* weight is what makes S-22b work. Retracting the offending row retracts its
+/// error by the same arithmetic that retracts any other row, so "the answer comes back when the data
+/// leaves" needs no special path — I-5, applied to errors.
+pub fn error_row(error: &PlanError) -> Row {
+    Row::new(vec![Value::Str(error.to_string())])
+}
+
+/// What one step produces: the output delta, and the delta of the live-error set (S-22).
+///
+/// Two streams rather than a `Result` because an evaluation error is not a failure of the step — it
+/// is part of the answer. The epoch seals either way (S-22, and I-3: an epoch that raised must not
+/// be skipped, or the next one would land on contents that never absorbed it).
+#[derive(Debug, Clone)]
+pub struct StepOutput {
+    pub data: ZSetBatch,
+    pub errors: ZSetBatch,
+}
+
+impl StepOutput {
+    /// A step that cannot raise: the error delta is empty.
+    pub fn infallible(data: ZSetBatch) -> Result<StepOutput> {
+        Ok(StepOutput {
+            errors: ZSetBatch::empty(error_schema()?)?,
+            data,
+        })
+    }
+
+    /// A step that may have recorded live errors.
+    pub fn new(data: ZSetBatch, error_entries: Vec<(Row, i64)>) -> Result<StepOutput> {
+        Ok(StepOutput {
+            errors: ZSetBatch::from_entries(error_schema()?, error_entries)?,
+            data,
+        })
+    }
+}
 
 /// What an operator promises to remember between steps (I-9).
 ///
@@ -70,11 +124,16 @@ pub trait Operator: fmt::Debug + Send {
     /// with real accounting when `EXPLAIN STATE` arrives.
     fn state_size(&self) -> usize;
 
-    /// Consume one epoch's input deltas and produce this epoch's output delta.
+    /// Consume one epoch's input deltas and produce this epoch's output delta, plus the delta of
+    /// the live-error set (S-22).
     ///
     /// `inputs` has exactly [`Operator::arity`] elements. An operator that is handed the wrong
     /// number returns [`OpError::Arity`] rather than assuming.
-    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch>;
+    ///
+    /// A returned `Err` means the *step* could not be performed — a wiring mistake, a schema
+    /// mismatch, a backend failure. An evaluation error over the data is **not** that: it goes into
+    /// [`StepOutput::errors`], the offending row is dropped (S-22a), and the epoch seals normally.
+    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput>;
 
     /// A deterministic rendering of whatever this operator remembers, for state fingerprints.
     ///

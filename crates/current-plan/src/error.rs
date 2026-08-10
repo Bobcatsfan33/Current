@@ -103,3 +103,21 @@ pub enum PlanError {
     #[error("{func} overflowed the Int64 range (S-30)")]
     AggregateOverflow { func: &'static str },
 }
+
+impl PlanError {
+    /// True for errors that are facts about the **data** rather than about the query (S-22).
+    ///
+    /// These are the ones that become *live errors*: they are recorded, the offending row or group
+    /// is dropped, and the answer is an error while the offending data is present. Everything else
+    /// here is a statement about the query itself — a refusal, a type mismatch — and a query that
+    /// does not bind never runs at all, so those propagate immediately and are not data-dependent.
+    #[must_use]
+    pub fn is_evaluation_error(&self) -> bool {
+        matches!(
+            self,
+            PlanError::ArithmeticOverflow { .. }
+                | PlanError::DivisionByZero { .. }
+                | PlanError::AggregateOverflow { .. }
+        )
+    }
+}

@@ -36,4 +36,4 @@ pub mod operator;
 pub use error::{OpError, Result};
 pub use join::Join;
 pub use linear::{Filter, Project};
-pub use operator::{Operator, StateBound};
+pub use operator::{error_row, error_schema, Operator, StateBound, StepOutput, ERROR_COLUMN};

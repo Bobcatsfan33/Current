@@ -37,7 +37,7 @@ use current_plan::type_of;
 use current_zset::{DataType, Row, Schema, ZSetBatch};
 
 use crate::error::{OpError, Result};
-use crate::operator::{unary, Operator, StateBound};
+use crate::operator::{error_row, unary, Operator, StateBound, StepOutput};
 
 /// `WHERE`: keep the entries whose predicate is TRUE, with their weights untouched (S-24).
 #[derive(Debug, Clone)]
@@ -98,19 +98,29 @@ impl Operator for Filter {
         0
     }
 
-    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch> {
+    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput> {
         let input = unary("filter", inputs)?;
         check_schema("filter", &self.input_schema, input)?;
 
         let mut kept = Vec::new();
+        let mut errors = Vec::new();
         for (row, weight) in input.entries()? {
             // The weight is carried through untouched, and its sign is never consulted: an entry
             // at -1 is filtered by exactly the test that filters an entry at +1 (I-5, S-24).
-            if is_true(&self.predicate, &row, &self.input_schema)? {
-                kept.push((row, weight));
+            match is_true(&self.predicate, &row, &self.input_schema) {
+                Ok(true) => kept.push((row, weight)),
+                Ok(false) => {}
+                // A row whose predicate raises has no truth value, so it cannot be kept and cannot
+                // be dropped silently: it is dropped and its error recorded at the row's weight
+                // (S-22a, S-22b).
+                Err(e) if e.is_evaluation_error() => errors.push((error_row(&e), weight)),
+                Err(e) => return Err(OpError::Plan(e)),
             }
         }
-        Ok(ZSetBatch::from_entries(self.input_schema.clone(), kept)?)
+        StepOutput::new(
+            ZSetBatch::from_entries(self.input_schema.clone(), kept)?,
+            errors,
+        )
     }
 }
 
@@ -172,22 +182,35 @@ impl Operator for Project {
         0
     }
 
-    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch> {
+    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput> {
         let input = unary("project", inputs)?;
         check_schema("project", &self.input_schema, input)?;
 
         let mut projected = Vec::with_capacity(input.len());
+        let mut errors = Vec::new();
         for (row, weight) in input.entries()? {
             let mut values = Vec::with_capacity(self.items.len());
+            let mut raised = false;
             for item in &self.items {
-                values.push(eval(&item.value, &row, &self.input_schema)?);
+                match eval(&item.value, &row, &self.input_schema) {
+                    Ok(value) => values.push(value),
+                    // A row missing a value in any output column cannot be emitted (S-22a).
+                    Err(e) if e.is_evaluation_error() => {
+                        errors.push((error_row(&e), weight));
+                        raised = true;
+                        break;
+                    }
+                    Err(e) => return Err(OpError::Plan(e)),
+                }
             }
-            projected.push((Row::new(values), weight));
+            if !raised {
+                projected.push((Row::new(values), weight));
+            }
         }
         // Consolidate: distinct input rows that projected to the same output row merge, and their
         // weights add (S-25). This is also where a +1 and a -1 for the same projected row cancel.
         let batch = ZSetBatch::from_entries(self.output_schema.clone(), projected)?;
-        Ok(batch.consolidate()?)
+        StepOutput::new(batch.consolidate()?, errors)
     }
 }
 

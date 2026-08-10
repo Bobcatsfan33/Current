@@ -754,18 +754,135 @@ fn s11_a_duplicate_output_name_is_refused() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn s22_an_evaluation_error_aborts_the_epoch_and_is_deterministic() {
+fn s22d_an_evaluation_error_is_deterministic() {
     let oracle = oracle_with(vec![(row(vec![i(1), i(0)]), 1)]);
-    let query = Query::from(Source::scan("t", "t")).project(vec![Named::new(
-        "q",
-        Expr::binary(BinOp::Div, Expr::column("t.a"), Expr::column("t.b")),
-    )]);
+    let query = divide_a_by_b();
     let first = plan_error(oracle.answer(&query).unwrap_err());
     let second = plan_error(oracle.answer(&query).unwrap_err());
     assert_eq!(first, PlanError::DivisionByZero { op: "/" });
     assert_eq!(
         first, second,
         "the same query on the same data errs the same way"
+    );
+}
+
+fn divide_a_by_b() -> Query {
+    Query::from(Source::scan("t", "t")).project(vec![Named::new(
+        "q",
+        Expr::binary(BinOp::Div, Expr::column("t.a"), Expr::column("t.b")),
+    )])
+}
+
+/// **S-22: an error is a property of the contents, not of the change.**
+///
+/// The offending row is inserted, and the query has no answer for as long as it is present — at
+/// that epoch and at every epoch after. Retract it and the answer comes back. This is the rule
+/// D-16 settled, and the behaviour C1 found the two implementations disagreeing about.
+#[test]
+fn s22_an_error_lasts_while_the_offending_data_is_present_and_no_longer() {
+    let mut oracle = oracle_with(vec![(row(vec![i(1), i(1)]), 1)]);
+    let query = divide_a_by_b();
+    assert_eq!(answer(&oracle, &query), "(q: Int64)\n(1) => 1\n");
+
+    // Epoch 2 brings a row that divides by zero.
+    let mut d = EpochDeltas::new();
+    d.push("t", row(vec![i(9), i(0)]), 1);
+    oracle.seal_epoch(d).unwrap();
+    assert_eq!(
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::DivisionByZero { op: "/" }
+    );
+
+    // Epoch 3 changes something unrelated. The error is still live, because the row is still there.
+    let mut d = EpochDeltas::new();
+    d.push("t", row(vec![i(2), i(2)]), 1);
+    oracle.seal_epoch(d).unwrap();
+    assert!(
+        oracle.answer(&query).is_err(),
+        "an error is a property of the contents, so it does not expire on its own"
+    );
+
+    // Epoch 4 retracts the offending row. The answer returns, with the epoch-3 row included.
+    let mut d = EpochDeltas::new();
+    d.push("t", row(vec![i(9), i(0)]), -1);
+    oracle.seal_epoch(d).unwrap();
+    assert_eq!(
+        answer(&oracle, &query),
+        "(q: Int64)\n(1) => 2\n",
+        "1/1 = 1 and 2/2 = 1, so one row at weight 2"
+    );
+}
+
+/// **S-22c: with several live errors, the least message is reported.**
+#[test]
+fn s22c_the_least_live_error_message_is_reported() {
+    // One row divides by zero; another overflows. Both are live at once.
+    let oracle = oracle_with(vec![
+        (row(vec![i(1), i(0)]), 1),
+        (row(vec![Value::Int(i64::MAX), i(1)]), 1),
+    ]);
+    let query = Query::from(Source::scan("t", "t")).project(vec![
+        Named::new(
+            "q",
+            Expr::binary(BinOp::Div, Expr::column("t.a"), Expr::column("t.b")),
+        ),
+        Named::new(
+            "s",
+            Expr::binary(BinOp::Add, Expr::column("t.a"), Expr::int(1)),
+        ),
+    ]);
+    // "arithmetic overflow in + (S-20)" < "division by zero in / (S-21)" lexicographically.
+    assert_eq!(
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::ArithmeticOverflow { op: "+" },
+        "the least message wins, and which one that is does not depend on scan order"
+    );
+}
+
+/// **S-22a: for an aggregate the unit is the group.** A group whose SUM overflows produces no row,
+/// and the error is live; other groups cannot rescue the answer.
+#[test]
+fn s22a_a_group_whose_aggregate_overflows_makes_the_answer_an_error() {
+    let oracle = oracle_with(vec![
+        (row(vec![i(1), Value::Int(i64::MAX)]), 2),
+        (row(vec![i(2), i(5)]), 1),
+    ]);
+    let query = Query::from(Source::scan("t", "t")).group_by(GroupBy {
+        keys: vec![Named::new("k", Expr::column("t.a"))],
+        aggregates: vec![Named::new("s", AggFunc::Sum(Expr::column("t.b")))],
+        having: None,
+    });
+    assert_eq!(
+        plan_error(oracle.answer(&query).unwrap_err()),
+        PlanError::AggregateOverflow { func: "SUM" },
+        "group 1 sums to 2 x i64::MAX, which does not fit"
+    );
+}
+
+/// **S-22d: how the history was batched into epochs does not change the error.**
+#[test]
+fn s22d_batching_does_not_change_the_answer_or_the_error() {
+    let rows = vec![
+        (row(vec![i(1), i(1)]), 1),
+        (row(vec![i(9), i(0)]), 1),
+        (row(vec![i(2), i(2)]), 1),
+    ];
+    let query = divide_a_by_b();
+
+    // All at once.
+    let one_epoch = oracle_with(rows.clone());
+
+    // One row per epoch.
+    let mut row_at_a_time = Oracle::new([("t".to_owned(), int_table(&["a", "b"]))]).unwrap();
+    for entry in rows {
+        let mut d = EpochDeltas::new();
+        d.extend("t", vec![entry]);
+        row_at_a_time.seal_epoch(d).unwrap();
+    }
+
+    assert_eq!(
+        plan_error(one_epoch.answer(&query).unwrap_err()),
+        plan_error(row_at_a_time.answer(&query).unwrap_err())
     );
 }
 

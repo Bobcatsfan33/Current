@@ -30,6 +30,7 @@ use current_zset::{Canonical, EpochDeltas, Row, Schema, Value, ZSetBatch};
 
 use crate::aggregate;
 use crate::error::{OracleError, Result};
+use crate::live_errors::LiveErrors;
 
 /// Epochs are dense integers starting at 1 (S-6). Epoch 0 means "nothing has been sealed".
 pub type Epoch = u64;
@@ -195,6 +196,7 @@ impl Oracle {
             });
         }
         let bound = bind(query, &self.catalog)?;
+        let mut live = LiveErrors::new();
 
         // FROM
         let mut relation = self.eval_source(&query.source, epoch)?;
@@ -203,8 +205,13 @@ impl Oracle {
         if let Some(predicate) = &query.filter {
             let mut kept = Vec::new();
             for (row, weight) in relation.entries {
-                if is_true(predicate, &row, &relation.schema)? {
-                    kept.push((row, weight));
+                // A row whose predicate raises has no truth value, so it is dropped and the error
+                // is recorded as live (S-22a). It does not abort the recomputation: the complete
+                // set of live errors has to be known before the least one can be reported (S-22c).
+                match is_true(predicate, &row, &relation.schema) {
+                    Ok(true) => kept.push((row, weight)),
+                    Ok(false) => {}
+                    Err(e) => live.record(e)?,
                 }
             }
             relation = Relation {
@@ -223,13 +230,16 @@ impl Oracle {
 
         // GROUP BY, then HAVING
         if let Some(group_by) = &query.group_by {
-            let grouped = self.eval_group_by(group_by, &relation, &bound.grouped_schema)?;
+            let grouped =
+                self.eval_group_by(group_by, &relation, &bound.grouped_schema, &mut live)?;
             relation = grouped;
             if let Some(having) = &group_by.having {
                 let mut kept = Vec::new();
                 for (row, weight) in relation.entries {
-                    if is_true(having, &row, &relation.schema)? {
-                        kept.push((row, weight));
+                    match is_true(having, &row, &relation.schema) {
+                        Ok(true) => kept.push((row, weight)),
+                        Ok(false) => {}
+                        Err(e) => live.record(e)?,
                     }
                 }
                 relation = Relation {
@@ -244,15 +254,32 @@ impl Oracle {
             let mut projected = Vec::with_capacity(relation.entries.len());
             for (row, weight) in &relation.entries {
                 let mut values = Vec::with_capacity(items.len());
+                let mut raised = false;
                 for item in items {
-                    values.push(eval(&item.value, row, &relation.schema)?);
+                    match eval(&item.value, row, &relation.schema) {
+                        Ok(value) => values.push(value),
+                        Err(e) => {
+                            live.record(e)?;
+                            raised = true;
+                            break;
+                        }
+                    }
                 }
-                projected.push((Row::new(values), *weight));
+                // A row missing a value in any output column cannot be emitted (S-22a).
+                if !raised {
+                    projected.push((Row::new(values), *weight));
+                }
             }
             relation = Relation {
                 schema: bound.output_schema.clone(),
                 entries: projected,
             };
+        }
+
+        // The answer is an error while any live error is present, whatever else was computed
+        // (S-22). The least message is reported (S-22c).
+        if let Some(error) = live.least() {
+            return Err(OracleError::Plan(error));
         }
 
         let entries = consolidate(relation.entries)?;
@@ -346,6 +373,7 @@ impl Oracle {
         group_by: &current_plan::plan::GroupBy,
         input: &Relation,
         output_schema: &Schema,
+        live: &mut LiveErrors,
     ) -> Result<Relation> {
         // Grouping treats nulls as equal to each other (S-28), which is *not* the three-valued
         // `=` of S-13. `Value`'s `Eq` says `Null == Null`, so a `BTreeMap` keyed by the key
@@ -360,8 +388,20 @@ impl Oracle {
                 });
             }
             let mut key = Vec::with_capacity(group_by.keys.len());
+            let mut raised = false;
             for k in &group_by.keys {
-                key.push(eval(&k.value, row, &input.schema)?);
+                match eval(&k.value, row, &input.schema) {
+                    Ok(value) => key.push(value),
+                    Err(e) => {
+                        live.record(e)?;
+                        raised = true;
+                        break;
+                    }
+                }
+            }
+            // A row with no key value belongs to no group, so it is dropped (S-22a).
+            if raised {
+                continue;
             }
             groups.entry(key).or_default().push((row.clone(), *weight));
         }
@@ -381,8 +421,22 @@ impl Oracle {
             }
 
             let mut values = key;
+            let mut raised = false;
             for agg in &group_by.aggregates {
-                values.push(aggregate::evaluate(&agg.value, &members, &input.schema)?);
+                match aggregate::evaluate(&agg.value, &members, &input.schema) {
+                    Ok(value) => values.push(value),
+                    Err(OracleError::Plan(e)) if e.is_evaluation_error() => {
+                        live.record(e)?;
+                        raised = true;
+                        break;
+                    }
+                    Err(other) => return Err(other),
+                }
+            }
+            // For an aggregate the unit is the group: a group whose aggregates cannot all be
+            // evaluated produces no row at all (S-22a).
+            if raised {
+                continue;
             }
             // Each group produces exactly one row, at weight 1: an aggregate result is a
             // statement about a group, and a group has no multiplicity (S-27).

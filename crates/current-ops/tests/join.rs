@@ -54,11 +54,12 @@ fn empty(schema: Schema) -> ZSetBatch {
 
 /// Step the join and render its output delta.
 fn step(join: &mut Join, left: &ZSetBatch, right: &ZSetBatch) -> String {
-    join.step(&[left, right])
-        .unwrap()
-        .canonical()
-        .unwrap()
-        .render()
+    let out = join.step(&[left, right]).unwrap();
+    assert!(
+        out.errors.is_empty(),
+        "the join raises nothing data-dependent"
+    );
+    out.data.canonical().unwrap().render()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -339,6 +340,7 @@ fn a_multi_column_key_requires_every_pair_to_match() {
             &batch(right, vec![(row(Some(1), Some(2)), 1)]),
         ])
         .unwrap()
+        .data
         .canonical()
         .unwrap()
         .render();

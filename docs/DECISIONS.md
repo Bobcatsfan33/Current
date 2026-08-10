@@ -159,6 +159,55 @@ byte size. That is enough for the I-9 accounting C2 needs — the declarations a
 rows an operator retains — and not enough for C8's `EXPLAIN STATE`, which wants real memory. C8
 replaces it, and until then no claim is made that entries are bytes.
 
+### D-16 · An evaluation error is a property of the contents; the live errors are a Z-set
+
+*Sprint: C3 (decided first, before any operator code). Preserves: I-1, I-2, I-3, I-5. Closes Q-2.
+Recorded in `docs/SEMANTICS.md` S-22, S-22a, S-22b, S-22c, S-22d.*
+
+**The decision.** The answer at epoch N is either a Z-set or an error, determined by the *contents*
+at epoch N. Data on which the query raises means the query has no answer while that data is present;
+retract it and the answer returns.
+
+**The alternative, and why it lost.** C1 found that the two implementations disagreed about an
+error's lifetime: the oracle recomputes over the integral, so a bad row raises at every epoch until
+it is retracted; the circuit sees each row once, so it raised once and then answered normally again.
+The second behaviour is not merely different, it is **incompatible with I-3**. If the epoch that
+raises is dropped, the next epoch's changes land on contents that never absorbed the dropped epoch,
+and the answer becomes a mixture of epoch N−1 and epoch N+1 — exactly the partial-epoch view I-3
+forbids. Under this decision the epoch seals normally and only the *answer* is an error.
+
+It also lost on principle. The engine's claim is that an answer is a function of the current
+contents; an error whose presence depended on which epoch delivered a row would make "does this
+query have an answer" a property of the delivery schedule.
+
+**The mechanism, and why it is small.** The live errors are maintained as an ordinary Z-set (S-22b):
+a row that raises contributes its error message at the row's weight, and retracting the row retracts
+the error by the same arithmetic. Nothing special-cases removing an error — that is I-5 applied to
+errors — and "the answer comes back when the data leaves" needs no separate machinery. In the engine
+the error stream is integrated into a result store exactly like the answer stream; in the oracle the
+live errors are collected during the recomputation it already does.
+
+**Two sub-decisions that make I-1 checkable.**
+
+- *Erroring rows are dropped* (S-22a) rather than carried forward with a placeholder. A placeholder
+  would have to be invented identically by two implementations that see the data differently.
+- *The least message is reported* when several errors are live (S-22c). Which error to report is
+  arbitrary; being deterministic about it is not, and a rule stated over messages alone is one both
+  implementations can follow without agreeing on scan order, stage order, or which row they looked
+  at first. Order-independent by construction rather than by care.
+
+**Cost, stated.** Every fallible operator now carries a second output stream and the state to
+maintain it, which is state that has to be declared and accounted under I-9 like any other. A query
+in error reports one of possibly several problems, and which one can change as data moves. And the
+`an_evaluation_error_aborts_the_step_without_advancing_the_epoch` test from C1 was **wrong under this
+rule** and has been replaced: the epoch now seals and the answer is the error, which is the I-3-safe
+behaviour the old test was quietly preventing.
+
+**What it opened up.** Error-raising expressions now enter the scenario generator, so the gates check
+that the two implementations agree about *which* epochs raise and *what they say* — not merely that
+neither raised. The generator's ledger receipts were regenerated as part of the same change, because
+the measured population moved.
+
 ---
 
 ## Open questions
@@ -174,10 +223,12 @@ express prices, rates, or ratios. The honest answer is fixed-point decimal arith
 compatible with I-1. What must be decided: the scale/precision model, rounding on division, and
 overflow behaviour. Until it is decided, the limitation stays in the README.
 
-### Q-2 · What an evaluation error does to a *standing* query
+### Q-2 · What an evaluation error does to a *standing* query — **CLOSED in C3 by D-16**
 
-*Raised: C0 (S-22). Confirmed as a real divergence in C1. **Scheduled: decided doc-first at the
-start of C3**, ahead of the C5 deadline.*
+*Raised: C0 (S-22). Confirmed as a real divergence in C1. **Decided doc-first at the start of C3**,
+ahead of its C5 deadline. The answer is D-16: an error is a property of the contents, and the live
+errors are a Z-set. What follows is the question as it stood, kept because the reasoning that led to
+the decision is worth more than the decision alone.*
 
 **Scheduled, not merely deferred.** C3 opens by settling this in `docs/SEMANTICS.md` — the doc
 first, then the oracle, then the engine (§10) — before any aggregate code is written. Three reasons

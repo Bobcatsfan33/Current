@@ -226,16 +226,17 @@ fn a_non_boolean_predicate_is_refused_at_construction() {
     );
 }
 
-/// **An evaluation error aborts the step and leaves the epoch where it was** (S-22, I-3).
+/// **An evaluation error seals its epoch and becomes the answer** (S-22, D-16, I-3).
 ///
-/// This also documents a real difference between the two implementations, recorded as part of
-/// Q-2 in `docs/DECISIONS.md`: the oracle recomputes over the whole integral, so a bad row makes
-/// it raise at *every* epoch from then on; the circuit sees each row once, so it raises at the
-/// epoch that carried the row and not afterwards. Neither is wrong — nothing has decided what a
-/// standing query should do with an error yet — and the C1 gate deliberately runs on scenarios
-/// that cannot raise, so the gate never depends on the undecided part.
+/// This test replaces C1's `an_evaluation_error_aborts_the_step_without_advancing_the_epoch`, which
+/// asserted the opposite and was **wrong** under the rule D-16 settled. Refusing to advance the
+/// epoch was the I-3 violation in disguise: the epoch's other changes would be dropped, and the next
+/// epoch would land on contents that never absorbed them, leaving the answer a mixture of epoch N−1
+/// and epoch N+1. The epoch now seals; only the *answer* is an error.
+///
+/// And the error is a property of the contents, so it lasts exactly as long as the offending row.
 #[test]
-fn an_evaluation_error_aborts_the_step_without_advancing_the_epoch() {
+fn an_evaluation_error_seals_its_epoch_and_lasts_while_the_row_does() {
     let mut builder = CircuitBuilder::new();
     let source = builder.source("t", "t", input_schema()).unwrap();
     let project = builder
@@ -259,25 +260,46 @@ fn an_evaluation_error_aborts_the_step_without_advancing_the_epoch() {
     circuit
         .step(&epoch(vec![(row(Some(6), Some(2)), 1)]))
         .unwrap();
-    assert_eq!(circuit.epoch(), 1);
-    let good = circuit.answer().unwrap();
+    assert_eq!(circuit.answer().unwrap().render(), "(q: Int64)\n(3) => 1\n");
 
-    let err = circuit
-        .step(&epoch(vec![(row(Some(1), Some(0)), 1)]))
-        .unwrap_err();
+    // An epoch carrying a division by zero *and* a good row. The epoch seals, both are processed,
+    // and the answer is the error.
+    circuit
+        .step(&epoch(vec![
+            (row(Some(1), Some(0)), 1),
+            (row(Some(8), Some(4)), 1),
+        ]))
+        .unwrap();
+    assert_eq!(circuit.epoch(), 2, "the epoch seals (S-22, I-3)");
+    let err = circuit.answer().unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "division by zero in / (S-21)",
+        "the message must be exactly the oracle's, with nothing added (I-1)"
+    );
+
+    // An unrelated later epoch does not clear it: the offending row is still there.
+    circuit
+        .step(&epoch(vec![(row(Some(9), Some(3)), 1)]))
+        .unwrap();
     assert!(
-        err.to_string().contains("division by zero"),
-        "expected a division-by-zero, got {err}"
+        circuit.answer().is_err(),
+        "the error is a property of the contents"
     );
+
+    // Retract the offending row and the answer returns — including everything the erroring epochs
+    // carried alongside it, which is what sealing them rather than dropping them bought.
+    circuit
+        .step(&epoch(vec![(row(Some(1), Some(0)), -1)]))
+        .unwrap();
     assert_eq!(
-        circuit.epoch(),
-        1,
-        "a failed step must not advance the epoch (I-3)"
+        circuit.answer().unwrap().render(),
+        "(q: Int64)\n(2) => 1\n(3) => 2\n",
+        "6/2 = 3, 8/4 = 2, 9/3 = 3"
     );
-    assert_eq!(
-        circuit.answer().unwrap(),
-        good,
-        "a failed step must not half-apply its epoch"
+    assert!(
+        circuit.error_store().is_empty(),
+        "retracting the row retracted its error by the same arithmetic (S-22b, I-5)"
     );
 }
 
@@ -337,7 +359,7 @@ mod accounting {
 
     use super::{epoch, input_schema, row};
     use current_circuit::{CircuitBuilder, CircuitError};
-    use current_ops::{OpError, Operator, StateBound};
+    use current_ops::{OpError, Operator, StateBound, StepOutput};
     use current_zset::{Schema, ZSetBatch};
 
     /// Declares a bound and then holds whatever it is told to hold. The point of the exercise.
@@ -367,14 +389,14 @@ mod accounting {
         fn state_size(&self) -> usize {
             self.held
         }
-        fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch, OpError> {
+        fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput, OpError> {
             let first = inputs.first().copied().ok_or(OpError::Arity {
                 op: "hoarder",
                 expected: 1,
                 found: 0,
             })?;
             self.held += first.len() * self.per_entry;
-            Ok(first.clone())
+            StepOutput::infallible(first.clone())
         }
     }
 

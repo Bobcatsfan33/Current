@@ -73,6 +73,19 @@ fn handwritten(name_seed: u64, epochs: Vec<EpochDeltas>) -> Scenario {
     }
 }
 
+/// The answer, or the live error, as one comparable string.
+///
+/// From C3 a query may legitimately have no answer (S-22), so a test that unwrapped the answer would
+/// be asserting the absence of errors rather than the property it is about. Rendering both means the
+/// comparison covers error text too, which is what I-1 requires.
+fn rendered(engine: &CircuitEngine) -> String {
+    use current_differential::EngineUnderTest;
+    match engine.answer() {
+        Ok(answer) => answer.render(),
+        Err(message) => format!("ERROR: {message}"),
+    }
+}
+
 /// Run a handwritten scenario through engine-vs-oracle and report the divergence if any.
 fn expect_agreement(label: &str, scenario: &Scenario) {
     match compare::<CircuitEngine, OracleEngine>(scenario) {
@@ -375,9 +388,15 @@ fn engine_vs_oracle_over_randomized_join_scenarios() {
         report.scenarios
     );
     assert_eq!(report.comparisons, report.epochs + report.scenarios);
-    assert_eq!(
-        report.error_answers, 0,
-        "a scenario raised an evaluation error; see Q-2 before changing this assertion"
+    // D-16 closed Q-2, so raising expressions are part of the population now. The fence that used
+    // to stand here — `error_answers == 0` — asserted that none occurred, because the two
+    // implementations disagreed about what an error meant. The claim is stronger now: the sweep
+    // above passing means both sides agreed at every comparison, error text included (`compare`
+    // treats two different messages as a divergence), and this asserts the population actually
+    // contains some so that agreement is not vacuous.
+    assert!(
+        report.error_answers > 0,
+        "no comparison raised, so agreement about errors was never tested (S-22, D-16)"
     );
 }
 
@@ -494,11 +513,11 @@ fn i2_two_runs_of_a_join_scenario_produce_byte_identical_state_and_answers() {
             let mut engine =
                 CircuitEngine::build(&scenario.tables, &scenario.query).expect("rung 2 builds");
             let mut states = vec![engine.state_fingerprint().unwrap()];
-            let mut answers = vec![engine.answer().unwrap().render()];
+            let mut answers = vec![rendered(&engine)];
             for epoch in &scenario.epochs {
                 engine.seal_epoch(epoch).unwrap();
                 states.push(engine.state_fingerprint().unwrap());
-                answers.push(engine.answer().unwrap().render());
+                answers.push(rendered(&engine));
             }
             (states, answers)
         };

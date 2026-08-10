@@ -66,9 +66,11 @@
 pub mod aggregate;
 pub mod engine;
 pub mod error;
+pub mod live_errors;
 
 pub use engine::{Epoch, Oracle};
 pub use error::{OracleError, Result};
+pub use live_errors::LiveErrors;
 
 // Re-exported so a reader of the oracle does not have to know where the shared layer lives.
 // The definitions are in `current-plan` (D-14); these are the same types, not copies.

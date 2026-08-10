@@ -25,8 +25,8 @@
 
 use std::collections::BTreeMap;
 
-use current_ops::{Operator, StateBound};
-use current_zset::{Canonical, EpochDeltas, Row, Schema, ZSetBatch};
+use current_ops::{error_schema, Operator, StateBound};
+use current_zset::{Canonical, EpochDeltas, Row, Schema, Value, ZSetBatch};
 
 use crate::error::{CircuitError, Result};
 use crate::result_store::ResultStore;
@@ -94,6 +94,13 @@ pub struct Circuit {
     /// handed to it — see [`Circuit::check_state_declarations`] for why that is the right bound and
     /// what it does and does not catch.
     emitted_entries: Vec<usize>,
+    /// The maintained integral of every operator's error stream (S-22b).
+    ///
+    /// A Z-set of messages, kept exactly like the answer: a row that raises contributes its error at
+    /// the row's weight, and retracting the row retracts the error. The query has an answer iff this
+    /// is empty, and the reported error is its least message — which is simply the first row of its
+    /// canonical form (S-22c).
+    error_store: ResultStore,
 }
 
 /// Builds a circuit in dependency order.
@@ -201,6 +208,7 @@ impl CircuitBuilder {
             epoch: 0,
             result: ResultStore::new(schema),
             emitted_entries: vec![0; node_count],
+            error_store: ResultStore::new(error_schema()?),
         })
     }
 }
@@ -218,9 +226,32 @@ impl Circuit {
         self.result.schema()
     }
 
-    /// The maintained answer as of the latest sealed epoch.
+    /// The maintained answer as of the latest sealed epoch — or the live error, if there is one.
+    ///
+    /// The query has no answer while data that raises is present (S-22). The reported error is the
+    /// least live message, which is the first row of the error store's canonical form because
+    /// canonical order sorts by the message column (S-22c).
     pub fn answer(&self) -> Result<Canonical> {
+        if !self.error_store.is_empty() {
+            let live = self.error_store.canonical()?;
+            let least = live
+                .entries()
+                .first()
+                .and_then(|(row, _)| row.get(0))
+                .and_then(|value| match value {
+                    Value::Str(message) => Some(message.clone()),
+                    _ => None,
+                })
+                .ok_or(CircuitError::CorruptErrorStore)?;
+            return Err(CircuitError::LiveEvaluationError(least));
+        }
         self.result.canonical()
+    }
+
+    /// The live errors as a Z-set, for tests and for state fingerprints.
+    #[must_use]
+    pub fn error_store(&self) -> &ResultStore {
+        &self.error_store
     }
 
     #[must_use]
@@ -242,6 +273,7 @@ impl Circuit {
     /// built, not here.
     pub fn step(&mut self, deltas: &EpochDeltas) -> Result<Epoch> {
         let mut outputs: Vec<Option<ZSetBatch>> = Vec::with_capacity(self.nodes.len());
+        let mut errors: Vec<ZSetBatch> = Vec::new();
 
         for index in 0..self.nodes.len() {
             let produced = match self.nodes.get(index) {
@@ -265,7 +297,11 @@ impl Circuit {
                         inputs.push(slot);
                     }
                     match self.nodes.get_mut(index) {
-                        Some(Node::Operator { op, .. }) => op.step(&inputs)?,
+                        Some(Node::Operator { op, .. }) => {
+                            let out = op.step(&inputs)?;
+                            errors.push(out.errors);
+                            out.data
+                        }
                         _ => return Err(CircuitError::UnknownNode(index)),
                     }
                 }
@@ -287,6 +323,12 @@ impl Circuit {
             .as_ref()
             .ok_or(CircuitError::UnknownNode(self.sink.0))?;
         self.result.absorb(sink_output)?;
+
+        // Every operator's error delta is folded into one live-error set (S-22b). Absorbed after
+        // the answer so that a step which fails outright leaves neither store touched.
+        for delta in &errors {
+            self.error_store.absorb(delta)?;
+        }
 
         // The epoch advances only now, after everything above succeeded. A step that fails leaves
         // the circuit on the previous epoch rather than half-way into a new one (I-3).
@@ -405,11 +447,16 @@ impl Circuit {
             }
         }
         out.push_str(&format!(
-            "sink node {} · result store holds {} row(s)\n",
+            "sink node {} · result store holds {} row(s) · {} live error(s)\n",
             self.sink.0,
-            self.result.len()
+            self.result.len(),
+            self.error_store.len()
         ));
         out.push_str(&self.result.canonical()?.render());
+        if !self.error_store.is_empty() {
+            out.push_str("live errors:\n");
+            out.push_str(&self.error_store.canonical()?.render());
+        }
         Ok(out)
     }
 }

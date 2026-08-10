@@ -26,6 +26,15 @@
 //! squeamishness — S-5 says such a history has no defined answer, so a scenario containing one
 //! would be asking two implementations to agree about nothing. The oracle's `NegativeIntegral`
 //! check is tested directly instead, in `current-oracle`'s own suite.
+//!
+//! ## Expressions that raise
+//!
+//! From C3 the generator **does** produce expressions that raise: division by a column that may be
+//! zero, and occasional `i64::MAX` literals that make `+`, `-`, `*` and `SUM` overflow. Before C3 it
+//! did not, because the two implementations disagreed about what an error meant to a standing query
+//! and the gates had to assert that none occurred. D-16 settled that — an error is a property of the
+//! contents (S-22) — so the gates now check the stronger claim: that both sides agree about *which*
+//! epochs raise and *what they say*.
 
 use std::collections::BTreeMap;
 
@@ -703,6 +712,10 @@ fn generate_comparison(rng: &mut Rng, scope: &Schema) -> Expr {
 
 fn literal_of(rng: &mut Rng, ty: DataType) -> Expr {
     match ty {
+        // One integer literal in 32 is `i64::MAX`, so that `+`, `-` and `*` can overflow (S-20) and
+        // `SUM` can exceed the Int64 range (S-30). Two *kinds* of live error in the population is
+        // what exercises S-22c's "least message wins" rule, which a single kind never would.
+        DataType::Int64 if rng.chance(1, 12) => Expr::int(i64::MAX),
         DataType::Int64 => Expr::int(rng.between(-2, 3)),
         DataType::Utf8 => Expr::string(*rng.pick(&["", "a", "b", "cc"]).unwrap_or(&"a")),
         DataType::Boolean => Expr::boolean(rng.chance(1, 2)),
@@ -748,15 +761,25 @@ fn generate_expr(rng: &mut Rng, scope: &Schema, ty: DataType, depth: u32) -> Exp
                 )
             }
             6 => {
-                // Division only by a non-zero literal. A column divisor would make most
-                // scenarios abort on DivisionByZero (S-21) instead of comparing answers; the
-                // error path itself is covered by direct tests in current-oracle, and the
-                // harness compares errors anyway if one ever occurs.
-                let divisor = *rng.pick(&[-3_i64, -2, -1, 1, 2, 3]).unwrap_or(&1);
+                // Division by a non-zero literal most of the time, and by a *column* one time in
+                // three — which can be zero or null, so it can raise `DivisionByZero` (S-21).
+                //
+                // Until C3 this generator deliberately never raised, because the two
+                // implementations disagreed about what an error meant and the gates had to assert
+                // that none occurred. D-16 settled that (an error is a property of the contents),
+                // so raising expressions belong in the population now: the gates check that both
+                // sides agree about *which* epochs raise and *what they say*, which is a stronger
+                // claim than "neither raised".
+                let divisor = if rng.chance(2, 3) {
+                    pick_column_of(rng, scope, DataType::Int64)
+                        .unwrap_or_else(|| Expr::int(*rng.pick(&[-3_i64, -1, 1, 3]).unwrap_or(&1)))
+                } else {
+                    Expr::int(*rng.pick(&[-3_i64, -2, -1, 1, 2, 3]).unwrap_or(&1))
+                };
                 Expr::binary(
                     BinOp::Div,
                     generate_expr(rng, scope, ty, depth - 1),
-                    Expr::int(divisor),
+                    divisor,
                 )
             }
             _ => Expr::Case {

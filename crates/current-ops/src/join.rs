@@ -49,7 +49,7 @@ use current_state::{Key, StateBackend, WriteBatch};
 use current_zset::{Row, Schema, Value, ZSetBatch};
 
 use crate::error::{OpError, Result};
-use crate::operator::{Operator, StateBound};
+use crate::operator::{Operator, StateBound, StepOutput};
 
 /// Which side of a join a key column belongs to. Named so the state declaration can say what its
 /// bound is proportional to (I-9).
@@ -215,7 +215,7 @@ impl Operator for Join {
     }
 
     /// `ΔOut = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB`, three probes, no shortcuts (D-3, §5.3).
-    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch> {
+    fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput> {
         let (delta_left, delta_right) = match inputs {
             [l, r] => (*l, *r),
             _ => {
@@ -295,8 +295,11 @@ impl Operator for Join {
         // derivation requires. Updating earlier would double-count this epoch's own rows.
         self.integrate(&left_entries, &right_entries)?;
 
+        // The join raises nothing data-dependent: key comparison cannot fail, and a weight product
+        // outside `i64` is an engine limit rather than an S-22 semantic error, so it stays a hard
+        // failure of the step on both sides.
         let batch = ZSetBatch::from_entries(self.output_schema.clone(), out)?;
-        Ok(batch.consolidate()?)
+        StepOutput::infallible(batch.consolidate()?)
     }
 }
 

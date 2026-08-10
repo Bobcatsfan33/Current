@@ -33,6 +33,19 @@ fn is_rung_one(scenario: &Scenario) -> bool {
     scenario.family == Family::FilterProject
 }
 
+/// The answer, or the live error, as one comparable string.
+///
+/// From C3 a query may legitimately have no answer (S-22), so a test that unwrapped the answer would
+/// be asserting the absence of errors rather than the property it is about. Rendering both means the
+/// comparison covers error text too, which is what I-1 requires.
+fn rendered(engine: &CircuitEngine) -> String {
+    use current_differential::EngineUnderTest;
+    match engine.answer() {
+        Ok(answer) => answer.render(),
+        Err(message) => format!("ERROR: {message}"),
+    }
+}
+
 /// The gate: engine against oracle, every sealed epoch, over randomized rung-1 scenarios.
 #[test]
 fn engine_vs_oracle_over_a_thousand_filter_project_scenarios() {
@@ -58,14 +71,15 @@ fn engine_vs_oracle_over_a_thousand_filter_project_scenarios() {
         "every scenario is compared once per sealed epoch, plus once before any epoch"
     );
 
-    // Rung-1 expressions over this generator's data cannot raise: division is only ever by a
-    // non-zero literal and the value domain is far too small to overflow `i64`. That is asserted
-    // rather than assumed, because if it stopped being true the gate would start comparing error
-    // *timing* — and the oracle and the circuit legitimately differ there (Q-2 in
-    // docs/DECISIONS.md), so the gate would fail for a reason that is not a bug.
-    assert_eq!(
-        report.error_answers, 0,
-        "a scenario raised an evaluation error; see Q-2 before changing this assertion"
+    // D-16 closed Q-2, so raising expressions are part of the population now. The fence that used
+    // to stand here — `error_answers == 0` — asserted that none occurred, because the two
+    // implementations disagreed about what an error meant. The claim is stronger now: the sweep
+    // above passing means both sides agreed at every comparison, error text included (`compare`
+    // treats two different messages as a divergence), and this asserts the population actually
+    // contains some so that agreement is not vacuous.
+    assert!(
+        report.error_answers > 0,
+        "no comparison raised, so agreement about errors was never tested (S-22, D-16)"
     );
 }
 
@@ -155,11 +169,11 @@ fn i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers() {
             let mut engine =
                 CircuitEngine::build(&scenario.tables, &scenario.query).expect("rung 1 builds");
             let mut states = vec![engine.state_fingerprint().unwrap()];
-            let mut answers = vec![engine.answer().unwrap().render()];
+            let mut answers = vec![rendered(&engine)];
             for epoch in &scenario.epochs {
                 engine.seal_epoch(epoch).unwrap();
                 states.push(engine.state_fingerprint().unwrap());
-                answers.push(engine.answer().unwrap().render());
+                answers.push(rendered(&engine));
             }
             (states, answers)
         };
@@ -280,8 +294,8 @@ fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
         one_shot.seal_epoch(&everything).unwrap();
 
         assert_eq!(
-            incremental.answer().unwrap().render(),
-            one_shot.answer().unwrap().render(),
+            rendered(&incremental),
+            rendered(&one_shot),
             "seed {seed}: the incremental answer and the one-shot answer differ"
         );
     }

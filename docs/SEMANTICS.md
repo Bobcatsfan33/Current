@@ -279,17 +279,77 @@ the sign of the dividend (Rust's and C's convention, and Postgres's).
 
 `i64::MIN / -1` and `i64::MIN % -1` overflow and raise `ArithmeticOverflow` (S-20).
 
-### S-22 · Errors abort the query for that epoch
+### S-22 · An error is a property of the *contents*, not of the change
 
-An evaluation error is not a value and does not become a `Null`. It aborts evaluation of the query
-at that epoch and is reported. Errors are deterministic: the same log prefix and the same query
-always produce the same error, or none (I-2).
+An evaluation error is not a value and does not become a `Null`. Instead:
 
-> **Open question, flagged not hidden.** For a *standing* query, "abort the epoch" is not yet a
-> complete answer — does the query stay registered, get quarantined, or get deregistered? Nothing
-> at rungs 1–3 in C0 needs the answer (there is no registry until C6), so it is not invented here.
-> It is recorded as an open decision in `docs/DECISIONS.md` and must be settled by C5, when
-> queries first arrive through the SQL door.
+**The answer at epoch N is either a Z-set or an error, and which one it is depends only on the
+contents at epoch N.** If the contents contain data on which the query raises, the query has no
+answer at that epoch and the error is reported. When that data is retracted, the answer comes back.
+
+This is the decision that closes the open question C0 left here and C1 sharpened (Q-2 in
+`docs/DECISIONS.md`, now **D-16**). The alternative — an error as a property of the *change*, raised
+by the epoch that carried the offending row and forgotten afterwards — was rejected. Two reasons,
+and the second is fatal:
+
+1. **The engine's whole claim is that an answer is a function of the current contents.** I-2 says
+   the state and every answer at epoch N is a pure function of the log prefix up to N. An error that
+   depended on *which epoch* delivered a row would make "does this query have an answer" depend on
+   the delivery schedule rather than the data.
+2. **It cannot be reconciled with I-3.** If an epoch that raises is simply dropped, the next epoch's
+   changes land on contents that never absorbed the dropped epoch, and the answer is then a mixture
+   of epoch N−1 and epoch N+1 — precisely the partial-epoch view I-3 forbids. Under this rule the
+   epoch **seals normally**; only the *answer* is an error.
+
+### S-22a · A row whose evaluation raises is dropped from the flow, and recorded
+
+An expression that raises on a row yields no value for that row, so the row cannot continue: it is
+dropped at the stage that raised, and the error is recorded as **live**. Downstream stages never see
+it.
+
+**For an aggregate the unit is the group, not the row.** A group whose aggregates cannot all be
+evaluated — because an argument raises on one of its members, or because the aggregate itself
+overflows (S-30) — produces no output row, and the error is recorded. A group row must have a value
+in every aggregate column, so there is no partial group to emit; and making the unit the group means
+one rule covers both "a member row raised" and "the total overflowed", which a per-row rule would
+not.
+
+Dropping rather than propagating is what makes the two implementations comparable. The oracle
+recomputes over the whole contents and the engine sees one delta at a time; if an erroring row were
+carried forward with some placeholder, each would have to invent the same placeholder. Dropping is
+the same decision on both sides regardless of when the row arrived.
+
+### S-22b · The live errors form a Z-set, so retraction returns the answer for free
+
+The set of live errors is maintained exactly like any other Z-set (S-4): a row that raises
+contributes its error at the row's weight, and retracting the row retracts the error by the same
+arithmetic. Nothing special-cases the removal of an error, which is I-5 applied to errors, and it is
+why "the answer comes back when the data leaves" needs no separate mechanism.
+
+An error's identity is its **message**. Two rows that raise the same error are two copies of one live
+error; the answer is an error while the total weight of the live-error Z-set is positive.
+
+### S-22c · With several live errors, the least message is reported
+
+A query may have more than one live error at once — a division by zero in one row and an overflow in
+another. The reported error is the **lexicographically least message** among the live errors.
+
+The choice of *which* error to report is arbitrary; being deterministic about it is not. A rule
+stated in terms of the messages alone is one that any implementation can follow without agreeing on
+scan order, stage order, or which row it happened to look at first — and I-1 requires the two
+implementations to produce the same bytes, error text included. The rule is therefore
+order-independent by construction rather than by care.
+
+*Consequence worth stating:* the reported message may change when data is inserted or retracted even
+though the query is still in error, because the least live message may change. That is a property of
+the data, which is what S-22 says an error is.
+
+### S-22d · Errors are deterministic
+
+The same log prefix and the same query always produce the same answer, error included, byte for byte
+(I-2). There is no timeout, no partial answer, and no dependence on how the history was batched into
+epochs: a history delivered as one big epoch and the same history delivered one row at a time raise
+the same error at the end.
 
 ---
 
@@ -469,7 +529,9 @@ S-5 non-negative integrals · S-6 epochs · S-7 total order on values · S-8 can
 answer equality · S-9 query shape · S-10 column references · S-11 explicit output names ·
 S-12 binding and named refusals · S-13 comparison with NULL · S-14 arithmetic with NULL ·
 S-15 Kleene connectives · S-16 IS NULL · S-17 WHERE keeps TRUE only · S-18 CASE · S-19 exact
-typing · S-20 overflow is an error · S-21 division by zero · S-22 errors abort the epoch ·
+typing · S-20 overflow is an error · S-21 division by zero · S-22 an error is a property of the
+contents · S-22a erroring rows are dropped and recorded · S-22b live errors form a Z-set ·
+S-22c the least message is reported · S-22d errors are deterministic ·
 S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-26 join multiplies
 weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
 groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·

@@ -42,7 +42,7 @@
       "value": [0, 2],
       "location": "testing/differential/src/scenario.rs",
       "steers": "The range of values in the `id` column, which is the column every generated join joins on.",
-      "justification": "The join-key domain sets how often two tables share a key at all. Measured at the committed artifact: of 387 join-family scenarios where both tables ended up populated, 266 produced a non-empty bare join. Before narrowing the domain the same measurement read 69 of 141 — under half — so most join scenarios were comparing two empty answers, which agree no matter how broken either side is. Three values is the smallest domain that still lets a null key, a matching key, and a non-matching key all occur.",
+      "justification": "The join-key domain sets how often two tables share a key at all. Measured at the committed artifact: of 371 join-family scenarios where both tables ended up populated, 251 produced a non-empty bare join. Before narrowing the domain the same measurement read 69 of 141 — under half — so most join scenarios were comparing two empty answers, which agree no matter how broken either side is. Three values is the smallest domain that still lets a null key, a matching key, and a non-matching key all occur.",
       "artifact": "testing/evidence/c0-generator-coverage.json",
       "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
       "sprint": "C0"
@@ -52,7 +52,7 @@
       "value": "3/8 insert, 1/8 duplicate, 2/8 retract, 1/8 update, 1/8 churn",
       "location": "testing/differential/src/scenario.rs, generate_operation",
       "steers": "Whether tables accumulate rows over a scenario or hover near empty.",
-      "justification": "With insertions and retractions balanced, a table stays near empty: joins find nothing, groups hold one row, and the suite spends its epochs comparing empty answers. Insertions outnumber retractions 3:2 so tables grow. Retractions remain a quarter of all operations outright, and update and churn carry negative weights too — measured at the artifact, 825 of 1,000 scenarios contain a retraction and 377 contain one in epoch one. The §6 C0 bar is that retractions are present from epoch one; this raises coverage without lowering that bar.",
+      "justification": "With insertions and retractions balanced, a table stays near empty: joins find nothing, groups hold one row, and the suite spends its epochs comparing empty answers. Insertions outnumber retractions 3:2 so tables grow. Retractions remain a quarter of all operations outright, and update and churn carry negative weights too — measured at the artifact, 808 of 1,000 scenarios contain a retraction and 377 contain one in epoch one. The §6 C0 bar is that retractions are present from epoch one; this raises coverage without lowering that bar.",
       "artifact": "testing/evidence/c0-generator-coverage.json",
       "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
       "sprint": "C0"
@@ -72,7 +72,7 @@
       "value": "1/6",
       "location": "testing/differential/src/scenario.rs, generate_epochs",
       "steers": "How often a sealed epoch carries no changes at all.",
-      "justification": "§7 requires empty epochs: the answer must not move across one. Measured at the artifact, 650 of 1,000 scenarios contain at least one, which is ample for `an_empty_epoch_never_changes_the_answer` to have something to check in every family.",
+      "justification": "§7 requires empty epochs: the answer must not move across one. Measured at the artifact, 647 of 1,000 scenarios contain at least one, which is ample for `an_empty_epoch_never_changes_the_answer` to have something to check in every family.",
       "artifact": "testing/evidence/c0-generator-coverage.json",
       "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
       "sprint": "C0"
@@ -82,7 +82,7 @@
       "value": "1/8",
       "location": "testing/differential/src/scenario.rs, generate_epochs",
       "steers": "How often a whole scenario carries no data at all.",
-      "justification": "§7 requires empty inputs — an engine that is wrong on an empty input is wrong before it starts. Measured at the artifact, 136 of 1,000. Higher would waste the sweep on the least informative case; zero would drop a case §7 names.",
+      "justification": "§7 requires empty inputs — an engine that is wrong on an empty input is wrong before it starts. Measured at the artifact, 150 of 1,000. Higher would waste the sweep on the least informative case; zero would drop a case §7 names.",
       "artifact": "testing/evidence/c0-generator-coverage.json",
       "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
       "sprint": "C0"
@@ -116,6 +116,26 @@
       "artifact": "testing/evidence/c0-generator-coverage.json",
       "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
       "sprint": "C0"
+    },
+    {
+      "name": "column-divisor rate",
+      "value": "2/3 of generated divisions divide by a column rather than a non-zero literal",
+      "location": "testing/differential/src/scenario.rs, generate_expr",
+      "steers": "How often a generated expression can raise DivisionByZero (S-21).",
+      "justification": "Until C3 the generator never raised, because the oracle and the engine disagreed about what an error meant to a standing query and both gates had to assert that none occurred. D-16 settled that (an error is a property of the contents, S-22), so raising expressions belong in the population. Measured at the regenerated artifact: 14 of 1,000 scenarios raise, across 35 comparisons, and both implementations agreed at every one. The rate is set by how often arithmetic appears at all rather than by this knob — raising the column-divisor rate from 1/3 to 5/6 moved the scenario count only from 14 to 15 — so it sits at a middle value and the specific error behaviours are pinned by handwritten scenarios instead.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C3"
+    },
+    {
+      "name": "extreme integer literal rate",
+      "value": "1/12 of Int64 literals are i64::MAX",
+      "location": "testing/differential/src/scenario.rs, literal_of",
+      "steers": "Whether +, -, * and SUM can overflow (S-20, S-30).",
+      "justification": "One kind of live error would never exercise S-22c's rule that the least message wins when several are live. An occasional i64::MAX literal gives a second kind — ArithmeticOverflow and AggregateOverflow alongside DivisionByZero — without touching the column value domain, which stays small so that collisions remain likely.",
+      "artifact": "testing/evidence/c0-generator-coverage.json",
+      "measured_on": "deterministic — a pure function of the seed range, no timing and no threads",
+      "sprint": "C3"
     },
     {
       "name": "null rate in generated values",

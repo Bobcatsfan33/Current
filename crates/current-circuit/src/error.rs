@@ -75,4 +75,16 @@ pub enum CircuitError {
 
     #[error("weight arithmetic overflowed i64 while {while_doing}")]
     WeightOverflow { while_doing: &'static str },
+
+    /// An error store entry that is not a message. Unreachable — the store's schema has one
+    /// non-null `Utf8` column — and reported rather than assumed.
+    #[error("internal: the live-error store holds an entry that is not a message")]
+    CorruptErrorStore,
+
+    /// The query has no answer because live errors are present (S-22).
+    ///
+    /// Displays as the message alone, with nothing added, so that it is byte-identical to the
+    /// oracle's rendering of the same error. I-1 compares the text.
+    #[error("{0}")]
+    LiveEvaluationError(String),
 }

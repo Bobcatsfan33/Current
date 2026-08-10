@@ -54,6 +54,14 @@ pub struct Coverage {
     /// starving, and the one that would show it again if the key domain ever widened.
     pub join_both_tables_populated: usize,
     pub join_bare_join_non_empty: usize,
+    /// Comparisons at which **both** sides reported the same live error (S-22).
+    ///
+    /// Before C3 this was necessarily zero: the generator produced nothing that could raise, and the
+    /// gates asserted as much, because the two implementations disagreed about what an error meant.
+    /// D-16 settled that, so raising expressions are now part of the population and this number is
+    /// the receipt for how much of it they are.
+    pub comparisons_that_raised: usize,
+    pub scenarios_that_raised: usize,
     pub operations: Vec<Operation>,
 }
 
@@ -73,6 +81,8 @@ pub fn measure(seeds: u64) -> Result<Coverage, String> {
         by_family: BTreeMap::new(),
         join_both_tables_populated: 0,
         join_bare_join_non_empty: 0,
+        comparisons_that_raised: 0,
+        scenarios_that_raised: 0,
         operations: Vec::new(),
     };
 
@@ -83,6 +93,16 @@ pub fn measure(seeds: u64) -> Result<Coverage, String> {
         c.scenarios += 1;
         c.epochs += report.epochs;
         c.comparisons += report.comparisons;
+
+        let raised = report
+            .answers
+            .iter()
+            .filter(|a| a.starts_with("ERROR"))
+            .count();
+        c.comparisons_that_raised += raised;
+        if raised > 0 {
+            c.scenarios_that_raised += 1;
+        }
 
         let productive = report
             .answers
@@ -236,6 +256,16 @@ impl Coverage {
             out,
             "  \"join_bare_join_non_empty\": {},",
             self.join_bare_join_non_empty
+        );
+        let _ = writeln!(
+            out,
+            "  \"comparisons_that_raised\": {},",
+            self.comparisons_that_raised
+        );
+        let _ = writeln!(
+            out,
+            "  \"scenarios_that_raised\": {},",
+            self.scenarios_that_raised
         );
 
         out.push_str("  \"by_family\": {\n");
