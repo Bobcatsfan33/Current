@@ -678,7 +678,7 @@ reasons are in **D-18** and repeated below. Everything else on §6 C4's list is 
 | Every acked batch appears exactly once (I-4) | `a_replayed_token_is_acknowledged_and_dropped`, plus the gate re-offering every token after recovery | a re-offered token that is not dropped fails the cycle |
 | A torn checkpoint is detected and the previous one used | `a_torn_checkpoint_is_detected_and_the_previous_one_is_used` | 150 scenarios, byte-corrupted checkpoints |
 | Recovery is idempotent | `recovery_is_idempotent_under_a_crash_during_recovery` | crash *during* recovery, twice, then recover: same state |
-| `StateBackend` frozen at exit | **D-18** | frozen, with its compatibility promise — and with the honest note that one implementation validated it, not two |
+| `StateBackend` frozen at exit | **D-18** | frozen **provisionally**, with its compatibility promise — final when a second backend validates it, no later than C8 entry (**D-19**) |
 
 **256 tests across the workspace**, zero ignored, zero skipped, zero flaky (two consecutive full
 runs, identical). The crash gate runs in ~42 s.
@@ -729,7 +729,20 @@ default, is what production uses, and is what the log's own durability tests use
 power loss**, and no count in this document should be read as if it did.
 
 **There is no real-`kill -9` subprocess test.** It was planned as the check that the in-process model
-is faithful, and it is not delivered. Remaining work, named.
+is faithful, and it is not delivered.
+
+**Where it lands: C9.** §6 C9's exit gate is precisely this test, under load and over the network:
+"kill -9 under load at 1,000 random points — every ack honored on recovery, no duplicate epochs
+delivered to subscribers". So the gap is not merely named, it is *scheduled*: C9 must kill a real
+process, and when it does it becomes the check that C4's in-process model was faithful. If the two
+ever disagree, C4's simulation is what is wrong, and C9 is where that shows up.
+
+Until then, a **nightly job** runs the crash gate at `SyncPolicy::Full`
+(`testing/crash/tests/nightly_full_sync.rs`, schedule-triggered). It observes nothing an in-process
+crash could not observe with fsync deferred — it is not a power-loss test and is labelled as such in
+its own module docs — and it exists so that every `sync_all` call in the log and the checkpoint
+protocol is exercised in bulk rather than by a handful of unit tests. A path never run in bulk is a
+path that quietly stops being reached.
 
 ### What is proven, and by which test
 
@@ -747,12 +760,13 @@ is faithful, and it is not delivered. Remaining work, named.
 
 ### What C4 does **not** deliver
 
-- **`RocksBackend`.** §6 C4 names it and D-5 mandates it. Two independent blockers in this
-  environment: `librocksdb-sys` needs a `libclang` it cannot load here (the build script links
-  `@rpath/libclang.dylib`; `bindgen-static` needs a `libclang.a` that is not shipped), and the machine
-  has 2.4 GiB free disk against a multi-GB build. The order-preserving byte codec it will need *was*
-  built and tested, so the riskiest part is done. **D-18** records the gap and what it costs: the trait
-  freeze is validated by one implementation, not two.
+- **Any non-memory backend.** §6 C4 names `RocksBackend` and D-5 mandated it. **D-19 has since amended
+  D-5 to `redb`**, a pure-Rust B-tree store, with the RocksDB build cost as the trigger — a debug
+  `librocksdb-sys` build produces over 2.1 GiB of object files and exhausted the machine's disk. (The
+  `libclang` half of C4's original diagnosis was **wrong** and is corrected in D-18: with
+  `bindgen-runtime` enabled, bindgen ran fine.) `RedbBackend` is C8-entry work; the order-preserving
+  byte codec it will need *was* built and tested here, so the riskiest part is done. The trait freeze is
+  **provisional** until it exists.
 - **Power-loss testing**, and the literal ack-before-fsync mutation. Needs a filesystem fault injector
   or a VM.
 - **A real-kill subprocess test.**

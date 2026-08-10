@@ -250,13 +250,29 @@ proxy for memory — `len` counts entries, not bytes, and C8's `EXPLAIN STATE` i
 real memory.
 
 **`RocksBackend` is not delivered, and the freeze is weaker for it.** §6 C4's build list names it and
-D-5 mandates it. It could not be built in this environment, for two independent reasons:
+D-5 mandated it — **D-19 has since amended D-5 to redb**, with these blockers as the trigger.
 
-1. `librocksdb-sys` runs `bindgen`, which needs `libclang`. The Command Line Tools ship
-   `libclang.dylib` but the build script is *linked* against `@rpath/libclang.dylib`, so neither
-   `LIBCLANG_PATH` nor `DYLD_FALLBACK_LIBRARY_PATH` resolves it; the `bindgen-static` feature needs
-   `libclang.a`, which is not shipped at all.
-2. The machine has 2.4 GiB of free disk. A librocksdb-sys build needs several.
+> **Correction, made in C5 pre-work.** This record originally gave *two* independent blockers, the
+> first of which was wrong:
+>
+> > 1. `librocksdb-sys` runs `bindgen`, which needs `libclang`. The Command Line Tools ship
+> >    `libclang.dylib` but the build script is *linked* against `@rpath/libclang.dylib`, so neither
+> >    `LIBCLANG_PATH` nor `DYLD_FALLBACK_LIBRARY_PATH` resolves it; the `bindgen-static` feature needs
+> >    `libclang.a`, which is not shipped at all.
+>
+> **`libclang` was never the blocker.** The C4 probe passed `--no-default-features`, which disabled
+> `librocksdb-sys`'s `bindgen-runtime` feature; without it `clang-sys` links `libclang` at load time
+> instead of `dlopen`-ing it, which is why `LIBCLANG_PATH` had no effect. With
+> `features = ["bindgen-runtime"]` and `LIBCLANG_PATH` pointing at the Command Line Tools library,
+> **`bindgen` ran fine** — no `brew`, no LLVM install. The diagnosis was mine and it was wrong; it is
+> corrected here rather than quietly deleted, because a wrong reason recorded as fact is worse than no
+> reason.
+>
+> The **real** blocker is the one below, and it is sufficient on its own.
+
+1. A `librocksdb-sys` debug build produces over 2.1 GiB of object files and exhausted the machine's
+   free disk while archiving them (`No space left on device`). That is a permanent cost for every
+   contributor and every CI runner, and it is why D-19 amends D-5.
 
 What that costs, stated rather than glossed: **the freeze is validated by one implementation, not
 two.** The whole point of freezing a trait at C4 is that a second backend can then slot in without
@@ -266,6 +282,60 @@ second implementation. The order-preserving byte codec `RocksBackend` will need
 sweep — so the piece most likely to be got wrong is done. But `RocksBackend` itself is outstanding
 work, it is named in `docs/PROGRESS.md` as such, and C4's gate does not depend on it: every I-4 and
 I-7 claim is proven over `MemBackend` plus real checkpoint files on a real filesystem.
+
+### D-19 · The operator-state backend is **redb**, amending D-5
+
+*Sprint: C5 (pre-work). Amends **D-5** in `ARCHITECTURE.md` §3. Preserves: I-9, D-1.
+Implementation is C8-entry work; this record is the decision only.*
+
+D-5 named "embedded LSM (RocksDB via `rust-rocksdb`)" as the first `StateBackend` implementation.
+**That is amended: the first non-memory backend will be [`redb`](https://crates.io/crates/redb), a
+pure-Rust embedded B-tree store.**
+
+**The trigger.** Two sprints tried to build `rust-rocksdb` and could not, for reasons that are about
+the toolchain rather than about Current:
+
+- `librocksdb-sys` compiles RocksDB's C++ from source. A debug build produced over 2.1 GiB of object
+  files and exhausted the development machine's free disk, which is the failure that actually stopped
+  it (`No space left on device`, while archiving).
+- It also requires `bindgen`, hence `libclang` — a second toolchain dependency, and one whose failure
+  mode is obscure (see the D-18 correction below).
+
+Neither is a Current problem, and both are permanent costs paid by every contributor and every CI
+runner. D-5 itself says the backend "is an optimization with a known interface, not a research
+problem" — so a dependency that makes the *build* a research problem is the wrong trade.
+
+**Why redb, specifically.**
+
+1. **Pure Rust removes both blockers permanently.** No C++ toolchain, no `bindgen`, no multi-GB build.
+   That is the whole point of the switch, and it is worth more than architectural kinship with the
+   original choice.
+2. **Maturity behind a frozen trait beats architectural kinship.** The trait boundary (§5.5, frozen in
+   D-18) is what D-5 says matters; which store sits behind it is replaceable. Given that, a mature,
+   format-stable store is worth more than an LSM that happens to match RocksDB's shape. A project whose
+   value is auditability should not stake its storage on a young on-disk format.
+3. **A B-tree matches our access pattern.** `StateBackend` traffic is dominated by *prefix scans*: the
+   join probes an index by key, and the aggregate reads `MIN` as the first entry of a scan and `MAX` as
+   the last (S-30, §5.3). B-trees scan a range without merging; an LSM must merge across levels to
+   answer the same question. The access pattern argues for a B-tree independently of the toolchain.
+4. **Single-writer ACID transactions match §8**: "No multi-writer: one log, one writer, one epoch clock
+   in v1." redb's transaction model is exactly that shape, so the checkpoint protocol
+   (`docs/DURABILITY.md` §3) needs nothing bolted on.
+
+**fjall, considered and rejected.** [`fjall`](https://crates.io/crates/fjall) is a pure-Rust LSM, and it
+is the *closer* architectural match to what D-5 originally wanted — it would have removed the toolchain
+blockers while keeping the LSM. It lost on two counts. It is younger, with a less settled on-disk
+format, which is the wrong risk for a store holding irreplaceable state. And the advantage an LSM buys
+— write amplification under heavy small writes — is not our bottleneck: our reads are scans, and
+reason 3 above works against it.
+
+**What is not decided here.** Nothing about tuning. D-5's successor inherits its rule that every tuned
+constant needs a ledger entry with a receipt (I-10), and C8 is where block sizes, caches and durability
+modes get measured. Today's decision is which crate, and why.
+
+**Scope.** `RedbBackend` is **not implemented today**. It is C8-entry work, and D-18's freeze stays
+**provisional** until it exists — because the freeze's whole claim is that a second backend can slot in
+without an operator changing, and one implementation cannot demonstrate that.
 
 ---
 

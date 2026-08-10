@@ -10,6 +10,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily. An odd minute on purpose: the top of the hour is when every other project's
+    # nightly fires, and a queued job is a job that reports late.
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -111,6 +115,25 @@ jobs:
 
       - name: Run the whole suite with no network
         run: unshare -rn cargo test --workspace --all-features --locked --offline
+
+  # The fsync path, in bulk, on a schedule.
+  #
+  # It observes nothing an in-process crash could not observe with fsync deferred — see
+  # docs/DURABILITY.md §5 and the test's own module docs. It exists so that every sync_all call in the
+  # log and the checkpoint protocol is exercised in bulk rather than by a handful of unit tests,
+  # because a path that is never run in bulk quietly stops being reached. It is NOT a power-loss test.
+  #
+  # Deliberately absent from the `ci` check's `needs`: a scheduled job must not gate a push.
+  nightly-full-sync:
+    name: nightly crash gate (SyncPolicy::Full)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The crash gate with every write fsynced
+        run: cargo test -p current-crash --locked --test nightly_full_sync -- --ignored --nocapture
 
   # A single required check, so branch protection has one name to point at rather than four that
   # drift as jobs are added.
