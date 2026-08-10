@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/current-zset",
+    "crates/current-oracle",
+    "testing/differential",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Bobcatsfan33/Current"
+publish = false
+
+[workspace.dependencies]
+current-zset = { path = "crates/current-zset" }
+current-oracle = { path = "crates/current-oracle" }
+
+arrow-array = { version = "59", default-features = false }
+arrow-buffer = { version = "59", default-features = false }
+arrow-schema = { version = "59", default-features = false }
+thiserror = { version = "2", default-features = false, features = ["std"] }
+
+proptest = { version = "1", default-features = false, features = ["std"] }
+rand = { version = "0.10", default-features = false, features = ["std"] }
+rand_chacha = { version = "0.10", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# ARCHITECTURE.md §10: no unwrap/expect/panic in library code. Denied at the workspace
+# level and re-allowed only inside `#[cfg(test)]` modules and test binaries, where
+# panicking IS the assertion mechanism.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# Hidden panic sources: an out-of-bounds index is a panic wearing a `[]`.
+indexing_slicing = "deny"
+# "If a test is skipped 'for now,' the sprint is not done" (§10) — the same goes for code.
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+
+[profile.test]
+opt-level = 1
