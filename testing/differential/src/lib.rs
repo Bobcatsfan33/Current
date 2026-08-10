@@ -28,6 +28,7 @@
 //! - [`sql_render`] — a typed query rendered back to SQL, so the fuzzer can drive the SQL door with
 //!   the population the generator already produces (C5).
 //! - [`sql_engine`] — the SQL door as an implementation: text in, circuit out.
+//! - [`memo_engine`] — one query registered into a memo, so the registry's plumbing is under I-1 (C6).
 //!
 //! ## Reproducing a failure
 //!
@@ -50,6 +51,7 @@ pub mod circuit_engine;
 pub mod coverage;
 pub mod engine;
 pub mod harness;
+pub mod memo_engine;
 pub mod oracle_engine;
 pub mod rng;
 pub mod scenario;
@@ -61,6 +63,7 @@ pub use engine::EngineUnderTest;
 pub use harness::{
     compare, sweep, sweep_matching, Divergence, DivergenceKind, Report, SweepReport,
 };
+pub use memo_engine::MemoEngine;
 pub use oracle_engine::{OracleEngine, SaboteurEngine};
 pub use rng::Rng;
 pub use scenario::{Family, Operation, Scenario};

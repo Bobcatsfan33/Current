@@ -14,6 +14,7 @@
 //! file is the only place in the SQL crate that names a backend at all.
 
 use current_circuit::{Circuit, CircuitBuilder, NodeId};
+use current_ops::Operator;
 use current_ops::{Aggregate, Distinct, Filter, Join, Project};
 use current_state::MemBackend;
 
@@ -28,9 +29,10 @@ pub fn instantiate(plan: &CircuitPlan) -> Result<Circuit> {
 
     // The same wiring check the incrementalizer makes, at the other end of the pipe. Cheap, and it
     // fails loudly at build time rather than quietly at answer time.
-    if circuit.output_schema() != &plan.output_schema {
+    let emitted = circuit.output_schema().map_err(circuit_error)?;
+    if emitted != &plan.output_schema {
         return Err(SqlError::PlanWiringMismatch {
-            emitted: circuit.output_schema().to_string(),
+            emitted: emitted.to_string(),
             expected: plan.output_schema.to_string(),
         });
     }
@@ -46,97 +48,116 @@ fn add(builder: &mut CircuitBuilder, node: &CircuitNode) -> Result<NodeId> {
         } => builder
             .source(table.clone(), alias.clone(), schema.clone())
             .map_err(circuit_error),
+        _ => {
+            let mut inputs = Vec::with_capacity(2);
+            for child in children(node) {
+                inputs.push(add(builder, child)?);
+            }
+            let op = operator_for(node)?.ok_or(SqlError::PlanWiringMismatch {
+                emitted: "a source with children".to_owned(),
+                expected: "an operator".to_owned(),
+            })?;
+            builder.add(op, inputs).map_err(circuit_error)
+        }
+    }
+}
+
+/// The nodes feeding this one, left to right.
+///
+/// Public because the memo walks a plan node by node — attaching some nodes and reusing others — and
+/// must agree with this crate about what a node's inputs *are*. Two answers to that question would be
+/// two wirings.
+#[must_use]
+pub fn children(node: &CircuitNode) -> Vec<&CircuitNode> {
+    match node {
+        CircuitNode::Source { .. } => Vec::new(),
+        CircuitNode::Filter { input, .. }
+        | CircuitNode::Project { input, .. }
+        | CircuitNode::Aggregate { input, .. }
+        | CircuitNode::Distinct { input } => vec![input.as_ref()],
+        CircuitNode::Join { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+    }
+}
+
+/// The operator one plan node describes, or `None` if the node is a source.
+///
+/// **The single place an operator is constructed from a plan.** `instantiate` walks a plan into a
+/// fresh circuit; C6's memo walks one into a live shared dataflow, attaching only the nodes it does not
+/// already have. Both call this. A second constructor would be a second set of decisions about which
+/// operator a node means — and I-8 asks whether shared and unshared execution agree, a question that
+/// is only meaningful if there is one answer to that.
+pub fn operator_for(node: &CircuitNode) -> Result<Option<Box<dyn Operator>>> {
+    Ok(match node {
+        CircuitNode::Source { .. } => None,
 
         CircuitNode::Filter {
             input,
             naming,
             predicate,
-        } => {
-            let child = add(builder, input)?;
-            let filter = Filter::new(input.schema().clone(), *naming, predicate.clone())
-                .map_err(ops_error)?;
-            builder
-                .add(Box::new(filter), vec![child])
-                .map_err(circuit_error)
-        }
+        } => Some(Box::new(
+            Filter::new(input.schema().clone(), *naming, predicate.clone()).map_err(ops_error)?,
+        )),
 
         CircuitNode::Project {
             input,
             naming,
             items,
             schema: _,
-        } => {
-            let child = add(builder, input)?;
-            let project =
-                Project::new(input.schema().clone(), *naming, items.clone()).map_err(ops_error)?;
-            builder
-                .add(Box::new(project), vec![child])
-                .map_err(circuit_error)
-        }
+        } => Some(Box::new(
+            Project::new(input.schema().clone(), *naming, items.clone()).map_err(ops_error)?,
+        )),
 
         CircuitNode::Join {
             left,
             right,
             keys,
             schema: _,
-        } => {
-            let left_id = add(builder, left)?;
-            let right_id = add(builder, right)?;
+        } => Some(Box::new(
             // One backend per side (§6 C2): the join keeps an integral of each input, because that
             // is what rule 2 requires — see `incremental.rs`.
-            let join = Join::new(
+            Join::new(
                 left.schema().clone(),
                 right.schema().clone(),
                 keys.clone(),
                 Box::new(MemBackend::new()),
                 Box::new(MemBackend::new()),
             )
-            .map_err(ops_error)?;
-            builder
-                .add(Box::new(join), vec![left_id, right_id])
-                .map_err(circuit_error)
-        }
+            .map_err(ops_error)?,
+        )),
 
         CircuitNode::Aggregate {
             input,
             keys,
             aggregates,
             schema,
-        } => {
-            let child = add(builder, input)?;
-            let aggregate = Aggregate::new(
+        } => Some(Box::new(
+            Aggregate::new(
                 input.schema().clone(),
                 schema.clone(),
                 keys.clone(),
                 aggregates.clone(),
                 Box::new(MemBackend::new()),
             )
-            .map_err(ops_error)?;
-            builder
-                .add(Box::new(aggregate), vec![child])
-                .map_err(circuit_error)
-        }
+            .map_err(ops_error)?,
+        )),
 
-        CircuitNode::Distinct { input } => {
-            let child = add(builder, input)?;
-            let distinct = Distinct::new(input.schema().clone(), Box::new(MemBackend::new()));
-            builder
-                .add(Box::new(distinct), vec![child])
-                .map_err(circuit_error)
-        }
-    }
+        CircuitNode::Distinct { input } => Some(Box::new(Distinct::new(
+            input.schema().clone(),
+            Box::new(MemBackend::new()),
+        ))),
+    })
 }
 
 /// A circuit-construction failure is a wiring bug, and it is reported as one rather than dressed up
 /// as a refusal: the query bound, so nothing the user wrote is at fault.
-fn circuit_error(error: current_circuit::CircuitError) -> SqlError {
+pub fn circuit_error(error: current_circuit::CircuitError) -> SqlError {
     SqlError::PlanWiringMismatch {
         emitted: error.to_string(),
         expected: "a circuit the plan describes".to_owned(),
     }
 }
 
-fn ops_error(error: current_ops::OpError) -> SqlError {
+pub fn ops_error(error: current_ops::OpError) -> SqlError {
     SqlError::PlanWiringMismatch {
         emitted: error.to_string(),
         expected: "an operator the plan describes".to_owned(),

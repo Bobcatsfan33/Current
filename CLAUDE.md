@@ -124,6 +124,14 @@ These are consequences of the invariants and the decisions, restated where they 
    entry in `testing/evidence/registry.json`. (I-10)
 10. **The scenario generator emits retractions from day one.** Never weaken the generator to make
     an implementation pass. The generator defines the bar. (§6 C0 pitfalls)
+11. **`crates/current-sql/tests/binder.rs` is the semantic gate for the SQL door.** Every dialect
+    change adds a row to its text↔expected-plan corpus, and every refusal adds a row to
+    `crates/current-sql/tests/dialect.rs`. *The differential harness cannot do this job.* I-6 makes
+    the two doors compile to identical plans, so a bug that binds SQL text to a **valid but wrong**
+    plan produces the same plan through both doors, the same answer as the oracle for the query it
+    actually compiled, and a green sweep. The only thing standing between "the text means what
+    S-11…S-36 say" and "the text means whatever the binder does" is that corpus. Never add dialect
+    surface without it. (C5's flag, recorded because the next dialect session will need it)
 
 ## Commit style
 

@@ -27,6 +27,15 @@
 //! No SQL: circuits are hand-built (§6 C1), and the incrementalizer that compiles a plan into one
 //! is C5. No durability: the result store is in memory, and C4 brings checkpoints. No sharing
 //! between circuits: that is the memo, C6. No join and no aggregate: C2 and C3.
+//!
+//! ## What C6 added here, and what it did not change
+//!
+//! A [`Circuit`] can now hold **many sinks** over one mutable DAG, which is what lets `current-memo`
+//! run several standing queries through shared circuitry. The single-sink door is untouched:
+//! `CircuitBuilder::build` makes one sink, [`Circuit::answer`] reads it, and every C1–C5 test runs the
+//! same code it always did. There is one step scheduler — `Circuit::pass` — and the memo does not have
+//! a second one, because a second one would be a second place for epoch discipline, state accounting
+//! and error attribution to be wrong.
 
 pub mod checkpoint;
 pub mod circuit;
@@ -34,6 +43,6 @@ pub mod error;
 pub mod result_store;
 
 pub use checkpoint::{load as load_checkpoint, take as take_checkpoint};
-pub use circuit::{Circuit, CircuitBuilder, Epoch, NodeId};
+pub use circuit::{Circuit, CircuitBuilder, Epoch, NodeId, SinkId};
 pub use error::{CircuitError, Result};
 pub use result_store::ResultStore;

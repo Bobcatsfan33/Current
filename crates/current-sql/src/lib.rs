@@ -21,6 +21,16 @@
 //! - [`circuit_plan`] — the plan type, its s-expression rendering, and its structural hash.
 //! - [`instantiate`] — plan → running circuit, allocating one state backend per stateful operator.
 //!
+//! ## The semantic gate for this crate is `tests/binder.rs`
+//!
+//! Not the differential harness. I-6 makes both doors compile to identical plans, so a binder that
+//! turns SQL text into a **valid but wrong** plan is invisible to a differential sweep: both doors
+//! produce that plan, and the oracle is asked the same wrong question, so the answers agree. What
+//! catches it is `tests/binder.rs` — SQL text on one side, the plan the rule says it means written out
+//! on the other — and `tests/dialect.rs`, which pins every refusal to the construct it names.
+//!
+//! **Every dialect change adds rows to both.** This is rule 11 in `CLAUDE.md`.
+//!
 //! ## The whole surface
 //!
 //! ```no_run
@@ -45,7 +55,7 @@ pub mod select;
 pub use circuit_plan::{CircuitNode, CircuitPlan, Rule};
 pub use error::{Result, SqlError};
 pub use incremental::{incrementalize, incrementalize_typed};
-pub use instantiate::instantiate;
+pub use instantiate::{children, instantiate, operator_for};
 pub use select::BoundQuery;
 
 use current_plan::bind::Catalog;

@@ -1,6 +1,5 @@
 [package]
-name = "current-differential"
-description = "The differential harness: seeded scenarios, engine vs oracle, every sealed epoch."
+name = "current-memo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +11,13 @@ publish.workspace = true
 current-zset.workspace = true
 current-plan.workspace = true
 current-ops.workspace = true
+current-state.workspace = true
 current-circuit.workspace = true
 current-sql.workspace = true
-current-memo.workspace = true
-current-state.workspace = true
-current-oracle.workspace = true
-rand_core.workspace = true
-rand_chacha.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+current-oracle.workspace = true
 
 [lints]
 workspace = true

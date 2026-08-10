@@ -981,3 +981,184 @@ scratch oracle would have caught it, which is the argument for I-1 in one line.
   still true.
 
 Per the sprint protocol in `CLAUDE.md`, **C6 does not begin in the session that finished C5.**
+
+---
+
+## C6 — the memo: standing queries and shared circuitry
+
+**Objective (§6):** many queries, one dataflow.
+
+Everything on §6 C6's list is delivered: canonicalization and structural hashing, the standing-query
+registry (register / read / deregister), attach-to-live-subtree with only the novel suffix
+instantiated, reference-counted teardown, the I-9 admission C2 deferred, and both halves of the I-8
+gate. Read two things before the tables: **sharing fails silently in two opposite directions**, and
+**one scheduler was generalized rather than a second one written**.
+
+### Recorded first: the SQL door's semantic gate
+
+C5's flag is now **rule 11 in `CLAUDE.md`** and a section at the top of `current-sql`'s crate docs:
+`crates/current-sql/tests/binder.rs` is the semantic gate for the SQL door, and the differential
+harness cannot do that job. I-6 makes both doors compile to identical plans, so a binder that turns
+text into a **valid but wrong** plan produces the same plan through both doors, the same answer as the
+oracle for the query it actually compiled, and a green sweep. Every dialect change adds rows to
+`binder.rs` and to `dialect.rs`.
+
+### One step scheduler, one or many sinks
+
+The memo needed many queries over one dataflow. The obvious way to get that is a second step loop
+inside `current-memo`; it does not have one. A second scheduler would be a second place for epoch
+discipline, state accounting and error attribution to be wrong, and I-8 would then be comparing two
+runtimes instead of one runtime with sharing on and off. So `Circuit` grew three capabilities and kept
+its single-sink door byte-for-byte intact:
+
+| Capability | Why the memo needs it |
+| --- | --- |
+| **many sinks**, each with its own answer store, error store, and *ancestor set* | the ancestor set is what keeps one query's evaluation error out of another's answer (S-22, I-8) |
+| **a mutable topology** — `attach`, `remove`, holes instead of renumbering | node ids are handles the memo holds in its hash and refcount maps; renumbering on removal would invalidate them |
+| **a partial pass** — `catch_up(deltas, subset)` | a query registered mid-history must be brought up to date *without* re-stepping the nodes it is about to share |
+
+Every C1–C5 test runs unchanged through `CircuitBuilder::build`, which now makes a one-sink circuit.
+`CircuitBuilder::add` and `Circuit::attach` share one `check_wiring` function, so the wiring rules
+cannot drift between the two doors.
+
+### Part 1 — canonicalization, conservative on purpose
+
+§5.7 says "share only exact sub-tree matches; no cross-predicate cleverness in v1", and the reason the
+rules are so few is that the two failure modes are not symmetric:
+
+- too **weak** costs sharing — answers stay right, the engine is slower and fatter;
+- too **strong** is cross-contamination — one query reads another's answer.
+
+So v1 normalizes exactly **one** thing, and `crates/current-memo/src/canonical.rs` carries the full
+inventory of what it does *not* normalize with the sharing each omission costs:
+
+| Rule | Test asserting the hash **hit** |
+| --- | --- |
+| join key pairs sorted (a conjunction has no order, S-26) | `reordered_join_keys_are_one_hash` |
+| the same query twice is one hash | `the_same_query_hashes_the_same` |
+| a common prefix hashes equal while the roots differ — the subtree property partial sharing stands on | `a_common_prefix_hashes_equal_while_the_roots_differ` |
+
+And the recorded costs, asserted as *misses* so they stay decisions rather than folklore:
+`a_swapped_comparison_does_not_share_and_that_is_the_recorded_cost` (`a = b` vs `b = a` hash apart),
+plus `different_queries_hash_apart` over eleven queries that must never collide.
+
+### Part 2 — the registry, and why registration is deliberately wasteful
+
+Registration instantiates **every** node of the plan fresh — duplicates included — catches those nodes
+up to the current epoch, and only then splices the query onto the nodes that already existed, freeing
+the copies. The order looks backwards and it is forced:
+
+> A novel suffix needs its input's **accumulated contents** to build its own state. Its input is a
+> shared node, and a shared node emits *deltas*; it keeps no integral of its output. Asking the shared
+> prefix to replay would corrupt it — a join fed its own history twice would double its index.
+
+What makes the splice sound is that the private copy and the shared original are the *same function of
+the same accumulated input*: identical operators, identical input, therefore identical state. That is
+I-2 restated, and it is the whole argument for mid-history attach.
+
+**The cost, stated plainly: registering a standing query costs one recomputation over the accumulated
+input; maintaining it costs O(change).** The memo keeps the accumulated input per table to pay it —
+the data, once, not per node. C7's Parquet ground truth and log compaction are where that stops being
+a `BTreeMap` in RAM.
+
+### Part 3 — the I-9 admission C2 deferred
+
+C2's state checker refused `StateBound::Unbounded` outright, noting it would become admissible "when
+C6's registry can admit it". It now is: `Admission::bounded()` is the default and refuses by name;
+`Admission::with_unbounded_state(reason)` admits, the reason is stored in the registry where someone
+can find it, and the admitted node is exempt from the *budget* and from nothing else — its size is
+still reported, with `budget=admitted-unbounded` in the fingerprint rather than a number nobody
+enforced.
+
+**Honest note: no v1 operator declares `Unbounded`.** The join, the aggregate and the distinct all keep
+state proportional to their input and say so. So the mechanism is tested with a probe operator at the
+circuit boundary (`unbounded_state_is_refused_by_default_and_admissible_on_request`) and by the
+registry's recording of the admission — including the seam, since
+`unbounded_state_is_admitted_per_registration_and_recorded` asserts that the flag reached the runtime
+for every node the registration built. Nothing here is load-bearing today; it exists because I-9
+requires it and because the next operator that needs it should find the door already built.
+
+### The exit gate
+
+| Gate condition (§6 C6) | Proven by | Result |
+| --- | --- | --- |
+| Overlapping battery, sharing on and off, **byte-identical answers** | `i8_sharing_changes_the_counters_and_not_one_answer_byte` | 12 overlapping queries × 5 epochs = **60 readings**, compared byte for byte |
+| **Counter proof** that sharing actually shared | same test | **64 operator steps shared vs 104 private** (38% fewer), **18 live nodes vs 41**; asserted as a floor of ≥ 25% saved, not merely `<` |
+| Every answer is the oracle's answer | `every_query_in_the_battery_agrees_with_the_oracle_at_every_epoch` | 60 answers vs a from-scratch recomputation, under sharing |
+| The memo's plumbing under I-1 | `the_memo_answers_the_whole_generated_population_as_the_oracle_does` | **4,400 scenarios, 24,747 comparisons, 204 error answers** |
+| Mid-history attach is correct | `a_query_attaching_mid_history_answers_as_though_it_had_always_been_there` | three latecomers at epoch 4 — a duplicate, a suffix, a new aggregate — each equal to the oracle for the *whole* history, then equal again after a further epoch |
+| Mid-history attach onto an **erroring** core (D-16) | `a_query_attaching_to_an_erroring_core_inherits_the_error_and_recovers_with_it` | the latecomer inherits the live division-by-zero, a bystander query that shares nothing is unaffected, and both recover when the offending row is retracted (S-22b) |
+| Teardown frees **exactly** the private suffix | `teardown_frees_exactly_the_private_suffix` | every holding back to baseline; the resident queries' answers unchanged to the byte |
+| 1,000 register/deregister cycles leak nothing | `a_thousand_cycles_over_a_live_dataflow_leak_nothing`, `a_thousand_register_deregister_cycles_leak_nothing` | 1,000 cycles rotating through the battery over a *live* dataflow, accounting asserted every 100 rounds and audited against the dataflow's own wiring |
+| A failed registration holds nothing | `a_refused_registration_holds_nothing` | four refusals, each leaving accounting at baseline |
+
+**337 tests across the workspace**, zero ignored except the scheduled nightly, zero skipped, zero
+flaky. The C6 gate runs in under a second.
+
+### The gate's teeth — and which half caught what
+
+Both mutations applied with a marker **grepped before the run**, and reverted; `grep -rn MUTANT` over
+`crates/` and `testing/` returns nothing.
+
+| Mutation | Caught by | Blind to it |
+| --- | --- | --- |
+| **(a) a hash that ignores one plan field** — `subtree_hash` erases filter predicates, so `WHERE t.k > 1` and `WHERE t.k > 2` collide | the **answer-equality** half of I-8, immediately: `SELECT ... WHERE t.k > 2` returned `t.k > 1`'s rows. Also `every_query_..._agrees_with_the_oracle`, `different_queries_hash_apart`, and `a_swapped_comparison_...` | — |
+| **(b) a refcount off by one** — every release leaves one reference behind, so nothing is ever freed | the **accounting** half: `audit()` reported `RefcountDisagrees { node: 0, held: 11, actual: 4 }`, failing the teardown gate, the leak gate, and every test that audits | **both other halves of I-8.** With the audit temporarily removed, the answer comparison *and* the counter comparison passed under the leak |
+
+That last cell was **measured, not assumed**: the audit call was removed, the mutation applied, and
+`i8_sharing_changes_the_counters_and_not_one_answer_byte` passed. It is exactly why the gate has three
+instruments and not one. A leaked node still computes the right thing for the queries that remain, and
+both sharing settings leak equally, so neither answers nor counters move.
+
+Symmetrically, mutation (a) is invisible to the counter half — a colliding hash *increases* sharing, so
+the step count goes **down**, which is the direction the counter half calls success.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| A query registers, answers, and deregisters | `a_query_registers_reads_and_deregisters` |
+| An overlapping query adds only its novel suffix | `an_overlapping_query_attaches_to_the_existing_subtree` |
+| Sharing off builds strictly more and answers identically | `sharing_off_builds_twice_and_answers_the_same` |
+| Deregistering one of two sharing queries leaves the other untouched | `deregistering_frees_exactly_the_private_suffix` |
+| A query registered mid-history holds the same answer as one that was always there | `a_query_registered_mid_history_catches_up` |
+| A grand total registered into a memo has its row before any epoch (S-33) | the battery's `SELECT COUNT(*) AS c, MIN(t.n) AS lo FROM t`, read at epoch 0 |
+| Unbounded state: refused by default, admitted explicitly, recorded, exempt from the budget only | `unbounded_state_is_refused_by_default_and_admissible_on_request`, `unbounded_state_is_admitted_per_registration_and_recorded` |
+| `Unbounded` is still never admissible through the single-query door | `an_unbounded_declaration_is_never_admissible_through_the_builder` |
+| A node is never freed while something reads it | `CircuitError::NodeStillConsumed`, raised by `Circuit::remove` |
+| The memo's refcounts agree with the dataflow's wiring | `Memo::audit`, called by every gate test |
+
+### What C6 does **not** prove
+
+- **The memo is not durable.** `Circuit::snapshot` carries state, not topology, and a memo's shape *is*
+  the set of queries registered right now. Recovering a registry means re-registering — correct, but it
+  costs one recomputation per query, and nothing wires it to the log yet. C4's checkpointing still
+  covers exactly what it covered: one circuit of a known shape. Named here rather than half-built.
+- **Sharing is not measured for cost, only for count.** "64 steps instead of 104" is a count of
+  operator invocations, not time or memory. There is still no benchmark artifact and the engine-constant
+  ledger is still empty (I-10). C8 and C10 own that.
+- **Canonicalization shares less than it could**, deliberately, and the inventory in `canonical.rs`
+  names each case: operand order, aliases, filter merging. Every one of those is a *missed* sharing
+  opportunity with a recorded reason, not an unknown.
+- **No concurrency.** One thread, one epoch clock. Registering while an epoch is being sealed is not a
+  case that exists yet, because there is nothing to be concurrent with (C9 brings the server).
+- **Read-at-epoch means "at the latest sealed epoch"**, and `Memo::read` returns which epoch that was so
+  a reader can honour I-3 across two reads. There is no way to ask for an *older* epoch: the memo keeps
+  one integral per query, not a history of them. MVCC is not in v1.
+- **The battery is hand-written.** The generated population goes through the memo one query at a time
+  (`MemoEngine`), which exercises registration and catch-up over 4,400 scenarios but shares nothing.
+  A fuzzer that generated *overlapping* query sets would be a better I-8 gate than twelve queries
+  chosen by hand; it does not exist, and the twelve were chosen to overlap at every rung.
+
+### What C7 needs
+
+- **The accumulated input already exists**, per table, inside the memo — kept for mid-history catch-up.
+  C7's Parquet ground truth is that same integral written down, and log compaction is what makes
+  keeping it unnecessary.
+- **One-shot queries are a registration and a deregistration.** `register` → `read` → `deregister`
+  already does it; what C7 adds is the ephemeral-circuit path that skips the sink bookkeeping, and the
+  measurement to say whether skipping it matters.
+- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4's list, named
+  in C5's, still true.
+
+Per the sprint protocol in `CLAUDE.md`, **C7 does not begin in the session that finished C6.**

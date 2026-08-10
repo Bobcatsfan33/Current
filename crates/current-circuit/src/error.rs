@@ -20,6 +20,19 @@ pub enum CircuitError {
     #[error("no node with id {0}")]
     UnknownNode(usize),
 
+    #[error("sink {0} does not exist in this circuit")]
+    UnknownSink(usize),
+
+    /// A node was freed while something still read it — a refcount bug in the memo, caught here
+    /// rather than becoming an empty answer downstream (I-8).
+    #[error("node {node} cannot be freed: node {consumer} still reads it")]
+    NodeStillConsumed { node: usize, consumer: usize },
+
+    /// A sink was repointed at a node emitting a different schema. Its answer store already holds
+    /// rows of the old one, and a schema is part of an answer (S-8).
+    #[error("a sink holding {held} cannot be repointed at a node emitting {offered}")]
+    SinkSchemaMismatch { held: String, offered: String },
+
     #[error(
         "node {node} takes input from node {input}, which is not earlier in the circuit; \
          a circuit is a DAG and is built in dependency order"

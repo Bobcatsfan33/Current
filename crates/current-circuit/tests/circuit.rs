@@ -93,7 +93,7 @@ fn a_hand_built_circuit_maintains_its_answer_from_deltas() {
         .step(&epoch(vec![(row(Some(1), Some(20)), -1)]))
         .unwrap();
     assert!(circuit.answer().unwrap().is_empty());
-    assert_eq!(circuit.result_store().len(), 0);
+    assert_eq!(circuit.result_store().unwrap().len(), 0);
 }
 
 /// A row inserted and retracted within one epoch nets to nothing.
@@ -298,7 +298,7 @@ fn an_evaluation_error_seals_its_epoch_and_lasts_while_the_row_does() {
         "6/2 = 3, 8/4 = 2, 9/3 = 3"
     );
     assert!(
-        circuit.error_store().is_empty(),
+        circuit.error_store().unwrap().is_empty(),
         "retracting the row retracted its error by the same arithmetic (S-22b, I-5)"
     );
 }
@@ -523,9 +523,14 @@ mod accounting {
         );
     }
 
-    /// `Unbounded` is refused until there is a registry to admit it (I-9, C6).
+    /// `Unbounded` is refused through the single-query door, always (I-9).
+    ///
+    /// C6 built the registry that can admit it, and this did not change: admission is a property of a
+    /// *registration*, and `CircuitBuilder` compiles one query with nobody to sign for it. The
+    /// admitting door is `Circuit::attach` — see
+    /// `unbounded_state_is_refused_by_default_and_admissible_on_request`.
     #[test]
-    fn an_unbounded_declaration_is_not_admissible_yet() {
+    fn an_unbounded_declaration_is_never_admissible_through_the_builder() {
         let mut builder = CircuitBuilder::new();
         let source = builder.source("t", "t", input_schema()).unwrap();
         let bound = StateBound::Unbounded {
@@ -539,4 +544,125 @@ mod accounting {
             "expected UnboundedStateNotAdmissible, got {err}"
         );
     }
+}
+
+/// An operator that declares unbounded state and holds some, so the I-9 admission has something to
+/// admit.
+///
+/// **No v1 operator declares `Unbounded`** — the join, the aggregate and the distinct all keep state
+/// proportional to their input and say so. The admission mechanism exists because I-9 requires it and
+/// because C2's state checker deferred it to "when C6's registry can admit it", so the thing being
+/// tested here is the mechanism, with a probe standing in for a future operator that needs it.
+#[derive(Debug)]
+struct UnboundedProbe {
+    schema: Schema,
+    held: usize,
+}
+
+impl current_ops::Operator for UnboundedProbe {
+    fn name(&self) -> &'static str {
+        "unbounded-probe"
+    }
+
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn output_schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn state_bound(&self) -> current_ops::StateBound {
+        current_ops::StateBound::Unbounded {
+            reason: "a probe: it remembers every entry it has ever seen",
+        }
+    }
+
+    fn state_size(&self) -> usize {
+        self.held
+    }
+
+    fn step(
+        &mut self,
+        inputs: &[&current_zset::ZSetBatch],
+    ) -> current_ops::Result<current_ops::StepOutput> {
+        let input = inputs.first().copied().ok_or(current_ops::OpError::Arity {
+            op: "unbounded-probe",
+            expected: 1,
+            found: 0,
+        })?;
+        // Grows without bound on purpose, and faster than its input, so a budget check would fail it.
+        self.held += input.len() * 8 + 1;
+        current_ops::StepOutput::infallible(input.clone())
+    }
+}
+
+/// Unbounded state is refused by default and accepted only with an explicit admission (I-9).
+#[test]
+fn unbounded_state_is_refused_by_default_and_admissible_on_request() {
+    let probe = || {
+        Box::new(UnboundedProbe {
+            schema: input_schema(),
+            held: 0,
+        })
+    };
+
+    // The single-query door never admits anything: admission is a property of a *registration*.
+    let mut builder = CircuitBuilder::new();
+    let source = builder.source("t", "t", input_schema()).unwrap();
+    let refused = builder.add(probe(), vec![source]);
+    assert!(
+        matches!(
+            refused,
+            Err(CircuitError::UnboundedStateNotAdmissible {
+                op: "unbounded-probe",
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+
+    // The shared-dataflow door refuses it too, unless the caller admits it.
+    let mut builder = CircuitBuilder::new();
+    let source = builder.source("t", "t", input_schema()).unwrap();
+    let passthrough = builder
+        .add(
+            Box::new(Filter::new(input_schema(), Naming::Qualified, Expr::boolean(true)).unwrap()),
+            vec![source],
+        )
+        .unwrap();
+    let mut circuit = builder.build(passthrough).unwrap();
+
+    let refused = circuit.attach(probe(), vec![source], false);
+    assert!(
+        matches!(
+            refused,
+            Err(CircuitError::UnboundedStateNotAdmissible { .. })
+        ),
+        "{refused:?}"
+    );
+
+    let admitted = circuit.attach(probe(), vec![source], true).unwrap();
+    assert!(
+        circuit.admitted_unbounded().contains(&admitted),
+        "the admission is recorded against the node, where the state check will look for it"
+    );
+
+    // And the admitted node is exempt from the *budget* — it has none — while everything else is
+    // still checked. Without the exemption this step would fail the I-9 accounting.
+    circuit
+        .step(&epoch(vec![
+            (row(Some(1), Some(1)), 1),
+            (row(Some(2), None), 1),
+        ]))
+        .unwrap();
+    let fingerprint = circuit.state_fingerprint().unwrap();
+    assert!(
+        fingerprint.contains("budget=admitted-unbounded"),
+        "an admitted operator's state is still reported, with no budget to pretend about:\n{fingerprint}"
+    );
+    assert!(
+        fingerprint.contains("state_size=17"),
+        "and its size is visible: 2 entries -> 17 held\n{fingerprint}"
+    );
 }

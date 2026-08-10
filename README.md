@@ -19,7 +19,7 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C5 complete (with the gaps named below)
+## Status: Sprint C6 complete (with the gaps named below)
 
 Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
@@ -37,7 +37,13 @@ structurally identical plans with identical execution counters.
 Anything SQL has that this dialect does not is refused **by name**: 60 such constructs are in
 `crates/current-sql/tests/dialect.rs`, each with the message that must name it.
 
-**What does not exist yet:** no shared circuitry (C6), no server (C9). Nothing here is usable as a database today, and nothing here is
+**Many queries, one dataflow.** Standing queries that overlap share the circuitry they have in
+common: register two queries with the same `WHERE` and the filter is stepped once per epoch, not
+twice. Sharing is asserted to be invisible — the same battery run with sharing on and off gives
+byte-identical answers — *and* asserted to actually happen, because a memo that quietly stopped
+sharing would still be correct: 64 operator steps instead of 104 over the gate's battery.
+
+**What does not exist yet:** no server (C9). Nothing here is usable as a database today, and nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
 group's whole value multiset, and `current-oracle` is *deliberately* slow, because its job is to be
 obviously correct, not quick.
@@ -78,6 +84,7 @@ crates/current-oracle/   the naive reference engine — the spec, and the arbite
 crates/current-ops/      circuit operators: filter, project, equi-join, aggregate, distinct
 crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
 crates/current-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
+crates/current-memo/     canonicalization, structural hashing, the standing-query registry
 crates/current-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
 crates/current-log/      the input log: a directory of files, epoch sealing, exactly-once admission
 testing/crash/           the crash harness: named seams, byte faults, recovery vs an uncrashed twin
@@ -89,7 +96,10 @@ docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 `current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
-**Known limitations, before you find them:** the SQL door is narrower than the typed API in one
+**Known limitations, before you find them:** the memo is **not durable** — its shape is the set of
+queries registered right now, and recovering a registry means re-registering, which costs one
+recomputation per query. Registering a standing query is O(data) by design; maintaining it is
+O(change). The SQL door is narrower than the typed API in one
 specific way — a query that both groups and projects cannot be written in SQL, because a group key's
 output name comes from the select list (S-11, S-36) — and the gate counts how much of its population
 that excludes rather than passing over it in silence. There is no non-integer
