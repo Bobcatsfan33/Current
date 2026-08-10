@@ -175,6 +175,7 @@ dependencies = [
  "current-ops",
  "current-oracle",
  "current-plan",
+ "current-state",
  "current-zset",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
@@ -186,6 +187,7 @@ name = "current-ops"
 version = "0.0.0"
 dependencies = [
  "current-plan",
+ "current-state",
  "current-zset",
  "thiserror",
 ]
@@ -201,6 +203,14 @@ dependencies = [
 
 [[package]]
 name = "current-plan"
+version = "0.0.0"
+dependencies = [
+ "current-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "current-state"
 version = "0.0.0"
 dependencies = [
  "current-zset",

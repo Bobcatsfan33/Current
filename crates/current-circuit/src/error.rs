@@ -44,13 +44,33 @@ pub enum CircuitError {
 
     #[error(
         "operator {op} declares its state bound as {declared} but is holding {actual} \
-         entries between steps — an operator exceeding its declaration is a bug, not a tuning \
-         problem (I-9)"
+         entries between steps, against a budget of {budget} — an operator exceeding its \
+         declaration is a bug, not a tuning problem (I-9)"
     )]
     StateBoundViolated {
         op: &'static str,
         declared: String,
         actual: usize,
+        budget: usize,
+    },
+
+    #[error(
+        "operator {op} declares its state as proportional to {declared} input(s) but is wired \
+         to {arity} — a declaration that does not describe the operator cannot be checked (I-9)"
+    )]
+    StateDeclarationArityMismatch {
+        op: &'static str,
+        declared: usize,
+        arity: usize,
+    },
+
+    #[error(
+        "operator {op} declares unbounded state ({reason}); an unbounded-by-nature construct must \
+         be admitted explicitly at query registration (I-9), and there is no registry until C6"
+    )]
+    UnboundedStateNotAdmissible {
+        op: &'static str,
+        reason: &'static str,
     },
 
     #[error("weight arithmetic overflowed i64 while {while_doing}")]

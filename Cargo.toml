@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/current-zset",
     "crates/current-plan",
+    "crates/current-state",
     "crates/current-oracle",
     "crates/current-ops",
     "crates/current-circuit",
@@ -20,6 +21,7 @@ publish = false
 [workspace.dependencies]
 current-zset = { path = "crates/current-zset" }
 current-plan = { path = "crates/current-plan" }
+current-state = { path = "crates/current-state" }
 current-oracle = { path = "crates/current-oracle" }
 current-ops = { path = "crates/current-ops" }
 current-circuit = { path = "crates/current-circuit" }

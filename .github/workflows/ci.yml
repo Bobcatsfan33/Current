@@ -60,8 +60,10 @@ jobs:
       # does not say how many scenarios ran is not evidence of much.
       - name: The C0 differential gate (oracle vs oracle — proves the harness)
         run: cargo test -p current-differential --locked --test oracle_vs_oracle -- --nocapture
-      - name: The C1 differential gate (engine vs oracle — proves I-1)
+      - name: The C1 differential gate (engine vs oracle, rung 1 — proves I-1)
         run: cargo test -p current-differential --locked --test c1_engine_vs_oracle -- --nocapture
+      - name: The C2 differential gate (join — the three-term rule)
+        run: cargo test -p current-differential --locked --test c2_join -- --nocapture
 
   no-network:
     name: no-network

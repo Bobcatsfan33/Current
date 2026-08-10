@@ -129,6 +129,36 @@ risk, and none of them is "we were careful":
 `current_plan::Query` → the incrementalizer". Both doors — SQL text and the typed API — produce
 the same `current_plan::Query`, which is what I-6 needs in order to be checkable at all.
 
+### D-15 · `StateBackend` keys are `Vec<Value>` ordered by S-7, not bytes
+
+*Sprint: C2. Preserves: I-2, I-9. Realises `ARCHITECTURE.md` §5.5; the trait is frozen at C4 exit.*
+
+§5.5 calls for "ordered KV with range scans, atomic multi-key write batches, and named snapshots".
+The obvious reading of "KV" is `Vec<u8>` → `Vec<u8>`. Current's `StateBackend` instead uses
+`Vec<Value>` keys ordered by the total order on values (S-7), with `i64` values.
+
+**Why.** An order-preserving byte encoding of a row is a real piece of engineering — sign-aware
+integer encoding, length-prefixed strings, null ordering — and getting it subtly wrong produces a
+backend whose scans return the right rows in the wrong order. That is a *storage* problem, and D-5
+and §2 both say storage is the boring part that lives behind the trait: "`current-log` and
+`current-state` must sit behind traits rather than being called concretely from operators." Putting
+the encoding in the *interface* would push a storage concern into every operator, and would make
+C2's join correctness depend on a serialiser written the same week.
+
+With domain-typed keys, `MemBackend` is a `BTreeMap<Vec<Value>, i64>` and its ordering is the one
+`docs/SEMANTICS.md` already defines and tests. `RocksBackend` (C4) will need the byte encoding, and
+that is exactly where it belongs — one implementation, tested against `MemBackend` as its oracle.
+
+**What is deliberately absent.** Named snapshots. Checkpoints are C4's deliverable and the protocol
+(§5.5: state flush → checkpoint record → log trim) is not designed yet; adding the methods now
+would be guessing at their shape. §5.5 says the trait is frozen at C4 exit, so it is allowed to
+grow until then, and this records what it is missing so C4 does not have to rediscover it.
+
+**Cost.** `state_size` is reported in *entries*, not bytes, because a `Vec<Value>` has no single
+byte size. That is enough for the I-9 accounting C2 needs — the declarations are about how many
+rows an operator retains — and not enough for C8's `EXPLAIN STATE`, which wants real memory. C8
+replaces it, and until then no claim is made that entries are bytes.
+
 ---
 
 ## Open questions
@@ -146,8 +176,35 @@ overflow behaviour. Until it is decided, the limitation stays in the README.
 
 ### Q-2 · What an evaluation error does to a *standing* query
 
-*Raised: C0 (S-22). Must be settled by: C5, when queries first arrive through the SQL door; a
-registry exists from C6.*
+*Raised: C0 (S-22). Confirmed as a real divergence in C1. **Scheduled: decided doc-first at the
+start of C3**, ahead of the C5 deadline.*
+
+**Scheduled, not merely deferred.** C3 opens by settling this in `docs/SEMANTICS.md` — the doc
+first, then the oracle, then the engine (§10) — before any aggregate code is written. Three reasons
+it goes at the front of C3 rather than waiting for C5:
+
+1. **The aggregates make it worse.** `SUM` overflows (S-30) and `AVG` divides. An error inside an
+   aggregate is an error about a *group*, so the question stops being "what does the query answer"
+   and becomes "does one poisoned group poison the answer" — a strictly harder question that is
+   better answered before there is an implementation defending itself.
+2. **The C2 gate is currently asserting the question away.** Both gates assert
+   `report.error_answers == 0`, which is honest but is a fence, not a fix. It is only sound while no
+   generated expression can raise, and C3's aggregates widen what can.
+3. **It is a semantics decision, and semantics decisions go first.** Deciding it after the
+   aggregates exist would mean fitting the rule to the code.
+
+**What C3 must produce, in order:** a rule in `docs/SEMANTICS.md` saying whether an error is a fact
+about the *state* (oracle-shaped: a poisoned row keeps raising until retracted — which an
+incremental engine must then remember deliberately, and remembering is state that needs an I-9
+declaration) or about the *change* (circuit-shaped: it raises once, as the row passes); then the
+oracle; then the engine. **And then the gate population changes:** error-raising expressions enter
+the scenario generator, the `error_answers == 0` assertions are replaced by assertions that both
+sides agree about *which* epochs raise and what they say, and the ledger's generator entries are
+regenerated because the population will have moved.
+
+Until that is done, the fence stays and is labelled as one.
+
+*Original statement of the question:*
 
 At rungs 1–3 in C0 an evaluation error aborts the query for that epoch and is reported, which is a
 complete answer for a one-shot recomputation. It is not a complete answer for a standing query:

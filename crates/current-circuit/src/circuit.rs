@@ -65,6 +65,10 @@ enum Node {
     Source {
         /// The table this node reads. Names the *catalog* entry.
         table: String,
+        /// The alias this node reads it under. Sources are keyed by alias, not table, so one table
+        /// can feed two nodes — which is what a self-join is (S-26, and the oracle already supports
+        /// it). Keying by table would have refused `FROM t a JOIN t b` as a duplicate source.
+        alias: String,
         /// The schema the node emits — the table's columns under their `alias.column` names
         /// (S-10, S-23). Rows are positional, so this is a pure rename of the table's schema.
         schema: Schema,
@@ -79,11 +83,17 @@ enum Node {
 #[derive(Debug)]
 pub struct Circuit {
     nodes: Vec<Node>,
-    /// Table name → source node. Ordered, so fingerprints and errors are stable (I-2).
+    /// Alias → source node. Ordered, so fingerprints and errors are stable (I-2).
     sources: BTreeMap<String, NodeId>,
     sink: NodeId,
     epoch: Epoch,
     result: ResultStore,
+    /// Entries each node has ever emitted, indexed by node.
+    ///
+    /// This is the I-9 accounting ledger. An operator's state budget is the number of entries ever
+    /// handed to it — see [`Circuit::check_state_declarations`] for why that is the right bound and
+    /// what it does and does not catch.
+    emitted_entries: Vec<usize>,
 }
 
 /// Builds a circuit in dependency order.
@@ -102,21 +112,32 @@ impl CircuitBuilder {
         CircuitBuilder::default()
     }
 
-    /// Add an input for `table`, emitting rows under `schema`.
+    /// Add an input reading `table` under `alias`, emitting rows under `schema`.
     ///
     /// `schema` is the table's columns renamed to `alias.column`; it must have the same arity and
     /// types as the catalog's schema, which the caller has already established by binding.
-    pub fn source(&mut self, table: impl Into<String>, schema: Schema) -> Result<NodeId> {
+    ///
+    /// Sources are keyed by **alias**, so one table may feed several nodes. That is what makes a
+    /// self-join representable — `FROM t a JOIN t b` needs two source nodes over one table, and the
+    /// oracle has supported it since C0.
+    pub fn source(
+        &mut self,
+        table: impl Into<String>,
+        alias: impl Into<String>,
+        schema: Schema,
+    ) -> Result<NodeId> {
         let table = table.into();
-        if self.sources.contains_key(&table) {
-            return Err(CircuitError::DuplicateSource(table));
+        let alias = alias.into();
+        if self.sources.contains_key(&alias) {
+            return Err(CircuitError::DuplicateSource(alias));
         }
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node::Source {
-            table: table.clone(),
+            table,
+            alias: alias.clone(),
             schema,
         });
-        self.sources.insert(table, id);
+        self.sources.insert(alias, id);
         Ok(id)
     }
 
@@ -133,6 +154,26 @@ impl CircuitBuilder {
                 expected: op.arity(),
                 found: inputs.len(),
             });
+        }
+        // A state declaration that does not describe the operator cannot be checked, so it is
+        // rejected here rather than accepted and quietly ignored later (I-9).
+        match op.state_bound() {
+            StateBound::ProportionalToInputs { inputs: declared }
+                if declared.len() != op.arity() =>
+            {
+                return Err(CircuitError::StateDeclarationArityMismatch {
+                    op: op.name(),
+                    declared: declared.len(),
+                    arity: op.arity(),
+                });
+            }
+            StateBound::Unbounded { reason } => {
+                return Err(CircuitError::UnboundedStateNotAdmissible {
+                    op: op.name(),
+                    reason,
+                });
+            }
+            StateBound::Stateless | StateBound::ProportionalToInputs { .. } => {}
         }
         for input in &inputs {
             if input.0 >= id.0 {
@@ -152,12 +193,14 @@ impl CircuitBuilder {
             return Err(CircuitError::EmptyCircuit);
         }
         let schema = node_schema(&self.nodes, sink)?.clone();
+        let node_count = self.nodes.len();
         Ok(Circuit {
             nodes: self.nodes,
             sources: self.sources,
             sink,
             epoch: 0,
             result: ResultStore::new(schema),
+            emitted_entries: vec![0; node_count],
         })
     }
 }
@@ -185,8 +228,8 @@ impl Circuit {
         &self.result
     }
 
-    /// The tables this circuit reads.
-    pub fn source_tables(&self) -> impl Iterator<Item = &str> {
+    /// The aliases this circuit reads under. Two aliases may name one table (a self-join).
+    pub fn source_aliases(&self) -> impl Iterator<Item = &str> {
         self.sources.keys().map(String::as_str)
     }
 
@@ -202,7 +245,7 @@ impl Circuit {
 
         for index in 0..self.nodes.len() {
             let produced = match self.nodes.get(index) {
-                Some(Node::Source { table, schema }) => {
+                Some(Node::Source { table, schema, .. }) => {
                     source_batch(schema, deltas.entries_for(table))?
                 }
                 Some(Node::Operator { .. }) => {
@@ -228,13 +271,14 @@ impl Circuit {
                 }
                 None => return Err(CircuitError::UnknownNode(index)),
             };
+            let emitted = produced.len();
+            if let Some(slot) = self.emitted_entries.get_mut(index) {
+                *slot = slot.saturating_add(emitted);
+            }
             outputs.push(Some(produced));
         }
 
-        // I-9, at the level C1 has: every operator declared what it would remember, so check it.
-        // In C1 every declaration is `Stateless`, which makes this the executable form of §6 C1's
-        // pitfall — a linear operator that started keeping something fails the run here rather
-        // than passing it and quietly growing. C2 extends this to real bounds.
+        // I-9: every operator declared what it would remember, so check it against what it holds.
         self.check_state_declarations()?;
 
         let sink_output = outputs
@@ -250,24 +294,66 @@ impl Circuit {
         Ok(self.epoch)
     }
 
+    /// Account every operator's actual state against its declaration (I-9).
+    ///
+    /// > Every stateful operator declares its state bound as a function of its input (e.g., join
+    /// > state is O(|A| + |B|)); the runtime accounts actual state against declarations, and an
+    /// > operator exceeding its declaration is a bug, not a tuning problem.
+    ///
+    /// **The budget.** For `ProportionalToInputs`, the bound is the number of entries ever handed
+    /// to the operator on those inputs. That is a sound upper bound on "O(|A| + |B|)" as an
+    /// operator can actually satisfy it: an index over a side's integral holds one entry per
+    /// *distinct* row, and distinct rows can never outnumber the entries that delivered them.
+    ///
+    /// **What it catches.** Anything whose state grows faster than its input. A join that stored
+    /// the cross product would hold |A|·|B| entries against a budget of |A|+|B| and fail as soon as
+    /// either side passes two rows. So would an operator that re-stored its whole input every
+    /// epoch, or one that kept a tombstone per row it had ever seen.
+    ///
+    /// **What it does not catch.** A constant-factor overshoot — state of 2(|A|+|B|), say, from
+    /// keeping a second copy of an index — sits inside the budget whenever retractions and
+    /// multiplicities mean entries outnumber distinct rows. Tightening that needs the real
+    /// per-operator input integrals, which is `EXPLAIN STATE` in C8; the honest position here is
+    /// that this catches the wrong *complexity*, not every wasted byte.
     fn check_state_declarations(&self) -> Result<()> {
-        for node in &self.nodes {
-            let Node::Operator { op, .. } = node else {
+        for (index, node) in self.nodes.iter().enumerate() {
+            let Node::Operator { op, inputs } = node else {
                 continue;
             };
             let declared = op.state_bound();
             let actual = op.state_size();
-            let within = match declared {
-                StateBound::Stateless => actual == 0,
-                // Nothing declares these in C1; the accounting that checks them arrives with the
-                // join in C2, which is the sprint that first has state to account for.
-                StateBound::ProportionalToInputs { .. } | StateBound::Unbounded { .. } => true,
+
+            let budget = match declared {
+                StateBound::Stateless => 0,
+                StateBound::ProportionalToInputs { .. } => {
+                    let mut total = 0usize;
+                    for input in inputs {
+                        let emitted = self
+                            .emitted_entries
+                            .get(input.0)
+                            .copied()
+                            .ok_or(CircuitError::UnknownNode(input.0))?;
+                        total = total.saturating_add(emitted);
+                    }
+                    total
+                }
+                // Refused at wiring time (`CircuitBuilder::add`), so a circuit holding one cannot
+                // be built. Reported rather than silently allowed, in case that ever changes.
+                StateBound::Unbounded { reason } => {
+                    return Err(CircuitError::UnboundedStateNotAdmissible {
+                        op: op.name(),
+                        reason,
+                    })
+                }
             };
-            if !within {
+
+            if actual > budget {
+                let _ = index;
                 return Err(CircuitError::StateBoundViolated {
                     op: op.name(),
                     declared: declared.to_string(),
                     actual,
+                    budget,
                 });
             }
         }
@@ -284,22 +370,37 @@ impl Circuit {
         let mut out = format!("circuit @ epoch {}\n", self.epoch);
         for (index, node) in self.nodes.iter().enumerate() {
             match node {
-                Node::Source { table, schema } => {
+                Node::Source {
+                    table,
+                    alias,
+                    schema,
+                } => {
                     out.push_str(&format!(
-                        "node {index} source table={table} schema={schema}\n"
+                        "node {index} source table={table} alias={alias} emitted={} schema={schema}\n",
+                        self.emitted_entries.get(index).copied().unwrap_or(0)
                     ));
                 }
                 Node::Operator { op, inputs } => {
                     let wiring: Vec<String> =
                         inputs.iter().map(|i| format!("node {}", i.0)).collect();
+                    let budget: usize = inputs
+                        .iter()
+                        .map(|i| self.emitted_entries.get(i.0).copied().unwrap_or(0))
+                        .sum();
                     out.push_str(&format!(
-                        "node {index} {} inputs=[{}] state_bound={} state_size={} schema={}\n",
+                        "node {index} {} inputs=[{}] state_bound={} state_size={} budget={} emitted={} schema={}\n",
                         op.name(),
                         wiring.join(", "),
                         op.state_bound(),
                         op.state_size(),
+                        budget,
+                        self.emitted_entries.get(index).copied().unwrap_or(0),
                         op.output_schema()
                     ));
+                    // An operator's own state, if it has any. This is what makes the I-2 gate a
+                    // comparison of *state* and not only of answers: a join holding different
+                    // indexes with the same answer must still register as different.
+                    out.push_str(&op.render_state()?);
                 }
             }
         }

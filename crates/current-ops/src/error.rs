@@ -1,6 +1,7 @@
 //! Errors from operators.
 
 use current_plan::PlanError;
+use current_state::StateError;
 use current_zset::{DataType, ZSetError};
 
 pub type Result<T> = std::result::Result<T, OpError>;
@@ -32,4 +33,19 @@ pub enum OpError {
 
     #[error("{op} requires a Boolean predicate but the expression has type {found} (S-17)")]
     PredicateNotBoolean { op: &'static str, found: DataType },
+
+    #[error(transparent)]
+    State(#[from] StateError),
+
+    #[error("join key names column {index} on the {side} side, which has no such column")]
+    JoinKeyOutOfRange { side: &'static str, index: usize },
+
+    #[error("join produced a weight outside the Int64 range")]
+    JoinWeightOverflow,
+
+    /// An index key shorter than its declared join key. Unreachable — every key this operator
+    /// writes is built as `[key values…, row values…]` — and reported rather than assumed, because
+    /// an operator that assumes its own state is well-formed cannot say when it is not.
+    #[error("internal: a join index key is shorter than its join key")]
+    CorruptJoinIndex,
 }

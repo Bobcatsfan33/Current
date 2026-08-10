@@ -14,7 +14,7 @@ use current_plan::plan::{BinOp, Named};
 use current_plan::Expr;
 use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
-fn input_schema() -> Schema {
+pub(crate) fn input_schema() -> Schema {
     Schema::new(vec![
         Field::nullable("t.a", DataType::Int64),
         Field::nullable("t.b", DataType::Int64),
@@ -22,14 +22,14 @@ fn input_schema() -> Schema {
     .unwrap()
 }
 
-fn row(a: Option<i64>, b: Option<i64>) -> Row {
+pub(crate) fn row(a: Option<i64>, b: Option<i64>) -> Row {
     Row::new(vec![
         a.map_or(Value::Null, Value::Int),
         b.map_or(Value::Null, Value::Int),
     ])
 }
 
-fn epoch(entries: Vec<(Row, i64)>) -> EpochDeltas {
+pub(crate) fn epoch(entries: Vec<(Row, i64)>) -> EpochDeltas {
     let mut d = EpochDeltas::new();
     d.extend("t", entries);
     d
@@ -39,7 +39,7 @@ fn epoch(entries: Vec<(Row, i64)>) -> EpochDeltas {
 #[test]
 fn a_hand_built_circuit_maintains_its_answer_from_deltas() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let filter = builder
         .add(
             Box::new(
@@ -100,7 +100,7 @@ fn a_hand_built_circuit_maintains_its_answer_from_deltas() {
 #[test]
 fn same_epoch_churn_leaves_no_trace() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let mut circuit = builder.build(source).unwrap();
 
     circuit
@@ -120,7 +120,7 @@ fn same_epoch_churn_leaves_no_trace() {
 #[test]
 fn an_empty_epoch_advances_the_clock_and_nothing_else() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let mut circuit = builder.build(source).unwrap();
 
     circuit
@@ -136,7 +136,7 @@ fn an_empty_epoch_advances_the_clock_and_nothing_else() {
 #[test]
 fn deltas_for_a_table_this_circuit_does_not_read_are_ignored() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let mut circuit = builder.build(source).unwrap();
 
     let mut deltas = epoch(vec![(row(Some(1), Some(1)), 1)]);
@@ -154,7 +154,7 @@ fn deltas_for_a_table_this_circuit_does_not_read_are_ignored() {
 #[test]
 fn the_builder_refuses_wiring_that_is_not_in_dependency_order() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let filter = Filter::new(
         input_schema(),
         Naming::Qualified,
@@ -176,7 +176,7 @@ fn the_builder_refuses_wiring_that_is_not_in_dependency_order() {
 #[test]
 fn the_builder_refuses_an_operator_wired_to_the_wrong_number_of_inputs() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let filter = Filter::new(
         input_schema(),
         Naming::Qualified,
@@ -202,9 +202,9 @@ fn the_builder_refuses_an_operator_wired_to_the_wrong_number_of_inputs() {
 #[test]
 fn the_builder_refuses_a_duplicate_source_and_an_empty_circuit() {
     let mut builder = CircuitBuilder::new();
-    builder.source("t", input_schema()).unwrap();
+    builder.source("t", "t", input_schema()).unwrap();
     assert!(matches!(
-        builder.source("t", input_schema()).unwrap_err(),
+        builder.source("t", "t", input_schema()).unwrap_err(),
         CircuitError::DuplicateSource(_)
     ));
 
@@ -237,7 +237,7 @@ fn a_non_boolean_predicate_is_refused_at_construction() {
 #[test]
 fn an_evaluation_error_aborts_the_step_without_advancing_the_epoch() {
     let mut builder = CircuitBuilder::new();
-    let source = builder.source("t", input_schema()).unwrap();
+    let source = builder.source("t", "t", input_schema()).unwrap();
     let project = builder
         .add(
             Box::new(
@@ -287,7 +287,7 @@ fn an_evaluation_error_aborts_the_step_without_advancing_the_epoch() {
 fn the_state_fingerprint_is_stable_and_reports_what_is_held() {
     let build_and_run = || {
         let mut builder = CircuitBuilder::new();
-        let source = builder.source("t", input_schema()).unwrap();
+        let source = builder.source("t", "t", input_schema()).unwrap();
         let filter = builder
             .add(
                 Box::new(
@@ -325,4 +325,190 @@ fn the_state_fingerprint_is_stable_and_reports_what_is_held() {
         a.contains("result store holds 1 row(s)"),
         "the null row was filtered out, leaving one:\n{a}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// I-9: state accounting. These use purpose-built operators, because the point is to check what
+// the *runtime* does when a declaration and reality disagree — and no real operator disagrees.
+// ---------------------------------------------------------------------------------------------
+
+mod accounting {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{epoch, input_schema, row};
+    use current_circuit::{CircuitBuilder, CircuitError};
+    use current_ops::{OpError, Operator, StateBound};
+    use current_zset::{Schema, ZSetBatch};
+
+    /// Declares a bound and then holds whatever it is told to hold. The point of the exercise.
+    #[derive(Debug)]
+    struct Hoarder {
+        schema: Schema,
+        bound: StateBound,
+        arity: usize,
+        held: usize,
+        /// Entries retained per entry that arrives. `1` is honest; more than 1 outgrows the input.
+        per_entry: usize,
+    }
+
+    impl Operator for Hoarder {
+        fn name(&self) -> &'static str {
+            "hoarder"
+        }
+        fn arity(&self) -> usize {
+            self.arity
+        }
+        fn output_schema(&self) -> &Schema {
+            &self.schema
+        }
+        fn state_bound(&self) -> StateBound {
+            self.bound
+        }
+        fn state_size(&self) -> usize {
+            self.held
+        }
+        fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch, OpError> {
+            let first = inputs.first().copied().ok_or(OpError::Arity {
+                op: "hoarder",
+                expected: 1,
+                found: 0,
+            })?;
+            self.held += first.len() * self.per_entry;
+            Ok(first.clone())
+        }
+    }
+
+    fn hoarder(bound: StateBound, arity: usize, per_entry: usize) -> Hoarder {
+        Hoarder {
+            schema: input_schema(),
+            bound,
+            arity,
+            held: 0,
+            per_entry,
+        }
+    }
+
+    fn one_input() -> StateBound {
+        StateBound::ProportionalToInputs { inputs: &["only"] }
+    }
+
+    /// An operator whose state grows faster than its input is caught, with the budget named.
+    ///
+    /// This is the shape of the bug I-9 exists to prevent: a join that stored the cross product
+    /// would hold |A|·|B| entries against a budget of |A|+|B|.
+    #[test]
+    fn state_growing_faster_than_its_input_is_caught() {
+        let mut builder = CircuitBuilder::new();
+        let source = builder.source("t", "t", input_schema()).unwrap();
+        let node = builder
+            .add(Box::new(hoarder(one_input(), 1, 3)), vec![source])
+            .unwrap();
+        let mut circuit = builder.build(node).unwrap();
+
+        let err = circuit
+            .step(&epoch(vec![
+                (row(Some(1), Some(1)), 1),
+                (row(Some(2), Some(2)), 1),
+            ]))
+            .unwrap_err();
+        match err {
+            CircuitError::StateBoundViolated {
+                op, actual, budget, ..
+            } => {
+                assert_eq!(op, "hoarder");
+                assert_eq!(actual, 6, "3 entries kept per entry, 2 entries in");
+                assert_eq!(budget, 2, "the budget is the entries handed to it");
+            }
+            other => panic!("expected StateBoundViolated, got {other}"),
+        }
+    }
+
+    /// An operator that keeps one entry per entry it is given sits inside its budget.
+    #[test]
+    fn state_proportional_to_its_input_is_accepted() {
+        let mut builder = CircuitBuilder::new();
+        let source = builder.source("t", "t", input_schema()).unwrap();
+        let node = builder
+            .add(Box::new(hoarder(one_input(), 1, 1)), vec![source])
+            .unwrap();
+        let mut circuit = builder.build(node).unwrap();
+        circuit
+            .step(&epoch(vec![
+                (row(Some(1), Some(1)), 1),
+                (row(Some(2), Some(2)), 1),
+            ]))
+            .unwrap();
+        circuit
+            .step(&epoch(vec![(row(Some(3), Some(3)), 1)]))
+            .unwrap();
+        assert_eq!(circuit.epoch(), 2);
+    }
+
+    /// A declaration of `Stateless` is checked against zero, not against a budget.
+    #[test]
+    fn a_stateless_declaration_that_holds_anything_is_caught() {
+        let mut builder = CircuitBuilder::new();
+        let source = builder.source("t", "t", input_schema()).unwrap();
+        let node = builder
+            .add(Box::new(hoarder(StateBound::Stateless, 1, 1)), vec![source])
+            .unwrap();
+        let mut circuit = builder.build(node).unwrap();
+
+        let err = circuit
+            .step(&epoch(vec![(row(Some(1), Some(1)), 1)]))
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CircuitError::StateBoundViolated {
+                    actual: 1,
+                    budget: 0,
+                    ..
+                }
+            ),
+            "a stateless operator has a budget of zero, got {err}"
+        );
+    }
+
+    /// A declaration naming a different number of inputs than the operator takes is refused at
+    /// wiring time: a declaration that does not describe the operator cannot be checked.
+    #[test]
+    fn a_declaration_that_does_not_match_the_arity_is_refused() {
+        let mut builder = CircuitBuilder::new();
+        let source = builder.source("t", "t", input_schema()).unwrap();
+        let bound = StateBound::ProportionalToInputs {
+            inputs: &["left", "right"],
+        };
+        let err = builder
+            .add(Box::new(hoarder(bound, 1, 1)), vec![source])
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CircuitError::StateDeclarationArityMismatch {
+                    declared: 2,
+                    arity: 1,
+                    ..
+                }
+            ),
+            "expected StateDeclarationArityMismatch, got {err}"
+        );
+    }
+
+    /// `Unbounded` is refused until there is a registry to admit it (I-9, C6).
+    #[test]
+    fn an_unbounded_declaration_is_not_admissible_yet() {
+        let mut builder = CircuitBuilder::new();
+        let source = builder.source("t", "t", input_schema()).unwrap();
+        let bound = StateBound::Unbounded {
+            reason: "aggregation over an unbounded key space",
+        };
+        let err = builder
+            .add(Box::new(hoarder(bound, 1, 1)), vec![source])
+            .unwrap_err();
+        assert!(
+            matches!(err, CircuitError::UnboundedStateNotAdmissible { .. }),
+            "expected UnboundedStateNotAdmissible, got {err}"
+        );
+    }
 }

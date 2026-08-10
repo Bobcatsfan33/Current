@@ -8,15 +8,17 @@
 //! | --- | --- | --- | --- |
 //! | [`Filter`] | linear | none | C1 |
 //! | [`Project`] | linear | none | C1 |
-//! | join | bilinear | O(\|A\| + \|B\|) | C2 |
+//! | [`Join`] | bilinear | O(\|A\| + \|B\|) | C2 |
 //! | aggregate, distinct | stateful | per group | C3 |
 //!
 //! ## The rule that governs every operator in this crate
 //!
 //! **Never special-case a negative weight** (I-5). A retraction flows through the same code path
-//! as an insertion, and in C1 that is not a discipline anyone has to maintain: neither operator
-//! reads a weight at all. Filter carries it through; project carries it through and lets
-//! consolidation add it up.
+//! as an insertion. The linear operators do not read a weight at all — filter carries it through,
+//! project carries it through and lets consolidation add it up. The join *does* read weights, and
+//! it still needs no special case: it **multiplies** them, and multiplication does not care about
+//! sign. A retraction on one side times an insertion on the other is a negative output weight,
+//! which is exactly the retraction of the joined row.
 //!
 //! ## Declared state, checked state
 //!
@@ -27,9 +29,11 @@
 //! assertion instead of a warning.
 
 pub mod error;
+pub mod join;
 pub mod linear;
 pub mod operator;
 
 pub use error::{OpError, Result};
+pub use join::Join;
 pub use linear::{Filter, Project};
 pub use operator::{Operator, StateBound};

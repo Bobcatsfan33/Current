@@ -7,8 +7,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | --- | --- |
 | **C0** — the oracle, the harness, and the rules | **complete; exit gate green in CI** |
 | **C1** — linear operators + the first real circuit | **complete; exit gate green in CI** |
-| C2 — join | not started |
-| C3 … C13 | not started |
+| **C2** — join | **complete; exit gate green in CI** |
+| C3 — aggregates and distinct | not started; opens by settling **Q-2** doc-first |
+| C4 … C13 | not started |
 
 ---
 
@@ -334,3 +335,148 @@ engine. What C1 leaves it:
   `s26_a_null_join_key_never_matches_even_another_null` pin the semantics C2's operator must match.
 
 Per the sprint protocol in `CLAUDE.md`, **C2 does not begin in the session that finished C1.**
+
+---
+
+## C2 — join
+
+**Objective (§6):** the first bilinear operator — "the hardest correctness class in the engine".
+
+### The exit gate
+
+| Gate condition (§6 C2) | Proven by | Result |
+| --- | --- | --- |
+| Differential harness green over join scenarios | `engine_vs_oracle_over_randomized_join_scenarios` | 1,090 join scenarios from 4,400 seeds · 5,161 epochs · **6,251 answer comparisons · 0 divergences** |
+| multi-key batches | `a_multi_key_batch_joins_only_the_matching_keys` | joins only the matching keys |
+| retractions of joined rows | `retracting_a_joined_row_retracts_the_output`, `retracting_one_side_retracts_the_joined_rows` | both joined rows retract from one retraction |
+| updates (retract+insert same epoch) | `a_same_epoch_update_moves_the_joined_row`, `a_same_epoch_update_on_both_sides` | |
+| weight multiplicities > 1 | `weights_multiply`, `both_sides_inserting_together_with_multiplicities` | 3 × 2 = 6 |
+| **the delta-delta term, with a scenario that isolates it** | `the_delta_delta_term_is_the_whole_answer_when_both_sides_insert_together`, `both_sides_inserting_a_matching_row_in_one_epoch` | see below |
+| state-bound declarations (I-9) **and the runtime accounting that checks them** | five tests in `circuit.rs::accounting`, plus `the_joins_state_is_accounted_against_its_declaration` | see below |
+
+**196 tests across the workspace**, zero ignored, zero skipped, zero flaky (two consecutive full
+runs, identical results).
+
+### The three-term rule, and the term everybody forgets
+
+`ΔOut = ΔA ⋈ B + A ⋈ ΔB + ΔA ⋈ ΔB`, written literally as three probes in `Join::step`, with the
+derivation in the module docs. `A` and `B` are the integrals **as they were before this epoch**, and
+the code integrates only after all three probes — probing updated indexes would count this epoch's
+rows twice.
+
+Each term is isolated by its own test, so a failure names the term rather than a seed:
+
+| Term | Isolating test | How it is isolated |
+| --- | --- | --- |
+| `ΔA ⋈ B` | `the_left_delta_probes_the_right_integral` | right side arrives in an earlier epoch |
+| `A ⋈ ΔB` | `the_right_delta_probes_the_left_integral` | mirror image |
+| `ΔA ⋈ ΔB` | `the_delta_delta_term_is_the_whole_answer_when_both_sides_insert_together` | one epoch, both indexes empty, so terms 1 and 2 probe nothing |
+| order of operations | `probing_happens_before_integrating_so_nothing_is_counted_twice` | both sides already populated, both gain a row; must emit 3 new pairs, not 6 |
+
+**And the gate has teeth — checked, not assumed.** Two deliberate mutations, both reverted:
+
+| Mutation | Caught by |
+| --- | --- |
+| **Drop `ΔA ⋈ ΔB`** (§6 C2's named pitfall) | 2 operator tests + 10 handwritten differential scenarios + the randomized gate at **seed 2, epoch 6** — 12 failures |
+| **Integrate before probing** (the double-count bug) | 5 operator tests + the gate at **seeds 90003, 90009 and seed 2, epoch 6** |
+
+Under both mutations the I-2 gate and the state accounting still passed. That is the same lesson C1
+recorded: a deterministic bug is still deterministic, and state accounting measures size, not
+correctness. Only I-1 catches a wrong answer.
+
+The delta-delta case is also **common in the randomized population, not just present in a
+handwritten test**: of 1,090 join scenarios, 946 change both sides in one epoch and **790 insert
+matching keys on both sides in one epoch** (`the_gate_population_contains_the_shapes_c2_names`). If
+the generator ever drifted so both sides stopped moving together, term 3 would go barely exercised
+and that test would say so.
+
+### I-9: the placeholder is gone
+
+C1 left `check_state_declarations` accepting any state size for a non-`Stateless` declaration,
+because nothing declared one. It no longer does. Every variant now has a real check:
+
+| Declaration | What the runtime does | Test |
+| --- | --- | --- |
+| `Stateless` | requires actual state of exactly 0 | `a_stateless_declaration_that_holds_anything_is_caught` |
+| `ProportionalToInputs` | budgets actual state against the entries ever handed to the operator | `state_growing_faster_than_its_input_is_caught`, `state_proportional_to_its_input_is_accepted` |
+| `Unbounded` | **refused at wiring time** — admission needs the registry, which is C6 | `an_unbounded_declaration_is_not_admissible_yet` |
+| any, mismatched | a declaration naming a different number of inputs than the operator takes is refused at wiring time | `a_declaration_that_does_not_match_the_arity_is_refused` |
+
+The join declares `ProportionalToInputs { inputs: ["left", "right"] }` and reports the entries held
+across both indexes. The budget is the entries ever delivered on those inputs, which is a sound
+upper bound on O(|A| + |B|): an index over a side's integral holds one entry per *distinct* row, and
+distinct rows can never outnumber the entries that delivered them.
+
+**What that catches and what it does not**, stated in the code and repeated here: it catches the
+wrong *complexity* — a join storing the cross product holds |A|·|B| against a budget of |A|+|B| and
+fails as soon as either side passes two rows. It does not catch a constant-factor overshoot, because
+retractions and multiplicities mean entries usually outnumber distinct rows. Tightening that needs
+real per-operator input integrals, which is `EXPLAIN STATE` in C8.
+
+### Also in C2
+
+- **`current-state`** (§5.5, §6 C2's "MemBackend"): the `StateBackend` trait and `MemBackend`. The
+  join reaches its indexes only through the trait, so C4 can hand it a `RocksBackend` without the
+  operator changing (§2). Keys are `Vec<Value>` ordered by S-7 rather than bytes — **D-15**, with
+  the reasoning and the cost. Named snapshots are deliberately absent until C4 designs the
+  checkpoint protocol, and that gap is labelled rather than guessed at.
+- **`WriteBatch` has `add` and no `delete`.** Every change to operator state in this engine is the
+  addition of a weight; a row leaves when its weight reaches zero. An interface with `delete` would
+  invite an operator to treat a retraction as a deletion, which is the special case I-5 forbids.
+- **Sources are keyed by alias, not table**, so a self-join is representable: `FROM t a JOIN t b`
+  needs two source nodes over one table. The oracle has supported that since C0 and the circuit
+  refused it until now (`a_table_joined_to_itself_agrees_with_the_oracle`).
+- **C1's gate kept its own meaning.** `CircuitEngine::claims` widened to include joins, so C1's gate
+  now filters on `Family::FilterProject` directly. Had it kept using `claims`, C1's numbers would
+  have silently become C1-and-C2's, and neither sprint's section here would describe its own gate.
+
+### What C2 does **not** prove
+
+- **Nothing about aggregation or distinct.** `GROUP BY` is refused by name, pointing at C3. Of
+  4,400 seeds, 3,310 were skipped as outside rung 2 — printed by the gate, not hidden.
+- **Nothing about outer joins or cross joins.** A join with no key pairs is refused
+  (`a_join_with_no_key_pairs_is_refused`); `LEFT JOIN` is rung 5.
+- **Nothing about state that outgrows memory.** `MemBackend` is a `BTreeMap` and
+  `scan_prefix` is a filtered walk — O(n) per probe, which is the wrong complexity for a join and is
+  knowingly left that way. C2 is the correctness sprint; the ordered-range fix is C10's, when there
+  is a benchmark to justify it. **No performance claim is made** and the engine-constant section of
+  the ledger is still empty.
+- **Nothing about durability.** The join's indexes are in memory and have no checkpoint. C4.
+- **Errors are still fenced off, and the fence is now scheduled to come down.** Both gates assert
+  that no scenario raised an evaluation error. That is sound only while no generated expression can
+  raise. See below.
+
+### Q-2 is open, and now scheduled
+
+C1 found that the oracle and the circuit disagree about an evaluation error's *lifetime*: the oracle
+recomputes over the integral so a bad row raises forever, the circuit sees each row once so it
+raises once. C2 did not touch it, and both gates continue to assert `error_answers == 0`.
+
+**It is decided at the start of C3, doc-first**, ahead of its C5 deadline — the full plan is in
+`docs/DECISIONS.md` under Q-2. Briefly: the aggregates make the question harder (`SUM` overflows,
+`AVG` divides, and an error inside an aggregate is an error about a *group*), so the rule is settled
+in `docs/SEMANTICS.md` before any aggregate code exists, then the oracle, then the engine. After
+that, **error-raising expressions enter the gate population**: the `error_answers == 0` assertions
+are replaced by assertions that both sides agree about which epochs raise and what they say, and the
+ledger's generator entries are regenerated because the population will have moved.
+
+### What C3 needs
+
+- **`GROUP BY` semantics are already decided and pinned.** S-27 through S-32, and 12 tests in
+  `crates/current-oracle/tests/semantics.rs` — drained groups vanish, MIN reveals the
+  second-smallest under retraction, `COUNT` of an all-null group is 0 while `SUM` is NULL, AVG lands
+  exactly on the weighted quotient. The engine is held to those, and does not get to reinterpret
+  them.
+- **The state vocabulary fits.** An aggregate declares
+  `ProportionalToInputs { inputs: ["input"] }` — one entry per group is bounded by the entries that
+  created the groups — and the runtime already budgets it. `StateBound::Unbounded` exists for
+  aggregation over an unbounded key space and is currently **refused**, which is correct until C6's
+  registry can admit it; if C3 needs it sooner, that is a decision to record, not a check to remove.
+- **MIN/MAX need a per-group multiset**, not a single value (§5.3, S-30). `MemBackend`'s ordered
+  prefix scan is exactly the shape for it: key the state as `[group key…, value]` and the smallest
+  live value is the first entry under the prefix.
+- **The families exist.** `Family::Aggregate` and `Family::JoinAggregate` are already generated —
+  most of the 3,310 seeds C2 skipped. Widening `CircuitEngine::claims` turns them on.
+- **Q-2 first, before any of it.**
+
+Per the sprint protocol in `CLAUDE.md`, **C3 does not begin in the session that finished C2.**

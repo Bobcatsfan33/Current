@@ -10,7 +10,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::{compare, sweep_matching, CircuitEngine, OracleEngine, Scenario};
+use current_differential::{
+    compare, sweep_matching, CircuitEngine, Family, OracleEngine, Scenario,
+};
 use current_plan::plan::{GroupBy, Named, Query, Source};
 use current_plan::{AggFunc, Expr};
 use current_zset::{DataType, Field, Schema};
@@ -22,14 +24,22 @@ use current_zset::{DataType, Field, Schema};
 /// qualifying seeds" would be the same set of scenarios described less clearly.
 const SEEDS: u64 = 4400;
 
+/// C1's gate is about **rung 1**, and it stays that way now that the engine also does joins.
+///
+/// `CircuitEngine::claims` widened in C2 to include `Family::Join`. If this gate had kept using it,
+/// C1's numbers would have silently become C1-and-C2's numbers, and neither sprint's gate would
+/// mean what its section of `docs/PROGRESS.md` says.
+fn is_rung_one(scenario: &Scenario) -> bool {
+    scenario.family == Family::FilterProject
+}
+
 /// The gate: engine against oracle, every sealed epoch, over randomized rung-1 scenarios.
 #[test]
 fn engine_vs_oracle_over_a_thousand_filter_project_scenarios() {
-    let report =
-        match sweep_matching::<CircuitEngine, OracleEngine>(0..SEEDS, CircuitEngine::claims) {
-            Ok(report) => report,
-            Err(divergence) => panic!("{divergence}"),
-        };
+    let report = match sweep_matching::<CircuitEngine, OracleEngine>(0..SEEDS, is_rung_one) {
+        Ok(report) => report,
+        Err(divergence) => panic!("{divergence}"),
+    };
 
     println!(
         "C1 differential gate: {} filter/project scenarios of {} seeds considered \
@@ -74,7 +84,7 @@ fn the_gate_population_is_full_of_retractions() {
 
     for seed in 0..SEEDS {
         let scenario = Scenario::generate(seed).unwrap();
-        if !CircuitEngine::claims(&scenario) {
+        if !is_rung_one(&scenario) {
             continue;
         }
         scenarios += 1;
@@ -133,7 +143,7 @@ fn i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers() {
     let mut checked = 0;
     for seed in 0..SEEDS {
         let scenario = Scenario::generate(seed).unwrap();
-        if !CircuitEngine::claims(&scenario) {
+        if !is_rung_one(&scenario) {
             continue;
         }
         checked += 1;
@@ -199,7 +209,7 @@ fn linear_operators_declare_and_hold_no_state() {
     let mut checked = 0;
     for seed in 0..SEEDS {
         let scenario = Scenario::generate(seed).unwrap();
-        if !CircuitEngine::claims(&scenario) || scenario.is_empty_input() {
+        if !is_rung_one(&scenario) || scenario.is_empty_input() {
             continue;
         }
         checked += 1;
@@ -212,12 +222,18 @@ fn linear_operators_declare_and_hold_no_state() {
             engine.seal_epoch(epoch).unwrap();
         }
         let fingerprint = engine.state_fingerprint().unwrap();
-        for line in fingerprint.lines().filter(|l| l.contains("state_bound=")) {
+        let linear = fingerprint
+            .lines()
+            .filter(|l| l.contains(" filter ") || l.contains(" project "));
+        let mut seen = 0;
+        for line in linear {
             assert!(
                 line.contains("state_bound=stateless") && line.contains("state_size=0"),
                 "seed {seed}: a linear operator is holding state:\n{line}"
             );
+            seen += 1;
         }
+        let _ = seen;
     }
     assert!(
         checked > 100,
@@ -241,7 +257,7 @@ fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
     let mut checked = 0;
     for seed in 0..SEEDS {
         let scenario = Scenario::generate(seed).unwrap();
-        if !CircuitEngine::claims(&scenario) {
+        if !is_rung_one(&scenario) {
             continue;
         }
         checked += 1;
@@ -276,8 +292,11 @@ fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
 }
 
 /// What the engine cannot do, it refuses by name — it does not answer something else.
+///
+/// The boundary moved in C2: a join is now built rather than refused, and this test moved with it
+/// rather than being deleted. What it still guarantees is that the *next* rung is refused loudly.
 #[test]
-fn the_engine_refuses_beyond_rung_one_and_names_the_sprint() {
+fn the_engine_refuses_beyond_what_it_implements_and_names_the_sprint() {
     use current_differential::EngineUnderTest;
 
     let ints = |names: &[&str]| {
@@ -299,10 +318,11 @@ fn the_engine_refuses_beyond_rung_one_and_names_the_sprint() {
         Source::scan("r", "r"),
         vec![("l.id".to_owned(), "r.id".to_owned())],
     ));
-    let error = CircuitEngine::build(&tables, &join).expect_err("a join must be refused");
+    // Rung 2 arrived in C2: a join now builds rather than being refused. This assertion moved with
+    // the boundary instead of being deleted, so the file still records where the boundary is.
     assert!(
-        error.contains("C2"),
-        "the refusal must name the sprint: {error}"
+        CircuitEngine::build(&tables, &join).is_ok(),
+        "a rung-2 join must build now that C2 has landed"
     );
 
     let grouped = Query::from(Source::scan("l", "l")).group_by(GroupBy {
@@ -338,7 +358,7 @@ fn the_gate_would_catch_a_wrong_circuit() {
     let mut examined = 0;
     for seed in 0..SEEDS {
         let scenario = Scenario::generate(seed).unwrap();
-        if !CircuitEngine::claims(&scenario) {
+        if !is_rung_one(&scenario) {
             continue;
         }
         let truthful =

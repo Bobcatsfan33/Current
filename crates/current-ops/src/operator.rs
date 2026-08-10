@@ -75,6 +75,16 @@ pub trait Operator: fmt::Debug + Send {
     /// `inputs` has exactly [`Operator::arity`] elements. An operator that is handed the wrong
     /// number returns [`OpError::Arity`] rather than assuming.
     fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<ZSetBatch>;
+
+    /// A deterministic rendering of whatever this operator remembers, for state fingerprints.
+    ///
+    /// The default is empty, which is the honest answer for a stateless operator. A stateful one
+    /// overrides it, and must render in a fixed order (I-2) — the I-2 gate compares these strings,
+    /// so an operator that rendered its state in hash order would make two identical runs look
+    /// different.
+    fn render_state(&self) -> Result<String> {
+        Ok(String::new())
+    }
 }
 
 /// Fetch the single input of a unary operator, or report the arity mismatch.
