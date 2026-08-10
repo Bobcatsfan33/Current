@@ -166,6 +166,13 @@ binder in C5 and will be specified then; they are a *frontend* question, not a s
 
 Duplicate output names in one schema are refused (`DuplicateOutputName`).
 
+**Every column of a query's output schema is declared nullable.** Schema equality is part of
+answer equality (S-8), so the oracle and the engine must agree on nullability exactly; a uniform
+rule is one they cannot drift apart on, whereas per-expression nullability inference is a second
+analysis that could disagree with itself. Where an aggregate genuinely never returns null —
+`COUNT` (S-30) — that is a semantic guarantee stated in this document and pinned by a test, not a
+decoration on the schema. Nullability is only *enforced* on stored table columns (S-2).
+
 ### S-12 · Binding is total and refusals are named
 
 Before evaluation, a query is **bound**: every column reference is resolved, every expression is
@@ -200,6 +207,13 @@ is not performed, so a `NULL` operand cannot raise a division-by-zero or overflo
 | **N** | N | F | N |     | **N** | T | N | N |     | **N** | N |
 
 Note the two rows that catch people: `F AND N = F` (not `N`), and `T OR N = T` (not `N`).
+
+**`AND` and `OR` do not short-circuit: both operands are always evaluated.** So
+`WHERE x <> 0 AND 100 / x > 1` raises `DivisionByZero` on a row where `x` is `0`, rather than
+being saved by the left operand. SQL does not guarantee short-circuiting either, and "sometimes
+evaluated" would make whether a query errors depend on evaluation order — which is precisely the
+kind of thing I-2 exists to forbid. `CASE` is the one construct that *does* short-circuit, and it
+does so by definition rather than as an optimisation (S-18).
 
 ### S-16 · IS NULL / IS NOT NULL are two-valued
 
@@ -244,6 +258,13 @@ in an earlier condition is raised.
 Any other combination is a binding error naming the operator and the operand types
 (`TypeMismatch`). There is no `Int64`-to-`Utf8` coercion, no truthiness of integers, no
 string-to-number parsing. `Float64` never appears as an operand or a result (S-3).
+
+**Null literals carry a type.** A bare, untyped `NULL` literal is refused
+(`UntypedNullLiteral`); a null literal is written with its type, and binding then types every
+expression without inference. SQL's untyped `NULL` — which needs contextual inference, or an
+explicit `CAST` — is a *frontend* problem and is deferred to the binder in C5, where it belongs.
+Nothing at rungs 1–3 needs it, because the typed API that C0 exposes can simply say which kind of
+null it means.
 
 ### S-20 · Integer overflow is an error, not a wrap
 
@@ -400,6 +421,12 @@ declared names, and nothing else. It never re-opens the input rows, so there are
 inside `HAVING` beyond the ones already declared — an aggregate call in a `HAVING` expression is
 refused (`AggregateInHaving`); declare it as an output and reference it by name.
 
+*In C0 that refusal has no code, because the typed API cannot express it:* a `HAVING` is a scalar
+expression, and the scalar expression type has no aggregate variant, so the illegal query does not
+type-check in Rust. Unrepresentable is a stronger guarantee than refused. The named refusal
+becomes real work in C5, when SQL text — which certainly can write `HAVING COUNT(*) > 2` — reaches
+the binder.
+
 ### S-33 · Aggregation without GROUP BY is not in rungs 1–3
 
 A query with aggregates and no group keys (`SELECT COUNT(*) FROM t` — the "grand total" shape) has
@@ -447,3 +474,9 @@ S-23 scan · S-24 filter preserves weights · S-25 projection merges rows · S-2
 weights · S-27 GROUP BY erases the schema · S-28 grouping treats NULLs as equal · S-29 drained
 groups vanish · S-30 aggregates respect weights and ignore NULLs · S-31 AVG is one division ·
 S-32 HAVING · S-33 grand-total aggregation is undecided.
+
+Three rules were added after the first draft, when writing the oracle exposed questions the draft
+had not answered. They are recorded in place rather than appended, and the additions are: null
+literals carry a type (in S-19); `AND`/`OR` do not short-circuit (in S-15); every output column is
+declared nullable (in S-11). The doc moved first, then the code — which is the order §10 requires,
+and the reason the order exists.
