@@ -54,4 +54,4 @@ pub use explain::{
     explain_circuit, reconcile_circuit, CostModel, ExplainState, OperatorState, QueryState,
     Reconciliation,
 };
-pub use registry::{Accounting, Admission, Handle, Memo, Registration, Sharing};
+pub use registry::{Accounting, Admission, CatchUp, Chunks, Handle, Memo, Registration, Sharing};

@@ -28,8 +28,10 @@ pub mod error;
 pub mod fault;
 pub mod log;
 pub mod record;
+pub mod stream;
 
 pub use error::{LogError, Result};
 pub use fault::{FaultInjector, FaultPlan, Seam};
 pub use log::{Ack, Batch, Epoch, Log, Pointer, SyncPolicy};
 pub use record::Record;
+pub use stream::{Epochs, SealedEpoch};

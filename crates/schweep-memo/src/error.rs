@@ -22,6 +22,17 @@ pub enum MemoError {
     #[error("a plan with no nodes cannot be registered")]
     EmptyPlan,
 
+    /// `register` was called on a memo that keeps no input cache (C9).
+    ///
+    /// Refused rather than silently registering a query that would answer only for epochs after it
+    /// arrived — which would be a query whose answer no oracle agrees with, and the quietest possible
+    /// way to break I-1. The caller must use `register_from` with the accumulated input it holds.
+    #[error(
+        "this memo keeps no accumulated input, so it cannot catch a registration up on its own; \
+         use register_from with the accumulated input (C7's snapshot plus the retained log suffix)"
+    )]
+    NoInputCache,
+
     /// A plan node's child was not found in the node list its parent was walked from. A bug in the
     /// registry's own walk, and one that would otherwise wire an operator to the wrong input.
     #[error("internal: a plan node's input is not in the plan's node list")]

@@ -154,6 +154,44 @@ pub struct Registration {
     pub registered_at: Epoch,
 }
 
+/// Where a registration's catch-up input comes from (C9).
+///
+/// Two shapes, one code path. A single accumulated delta is what C6's registry has always used and what a
+/// memo with an input cache produces; a *stream* of per-epoch deltas is what a caller with the data on
+/// disk can produce without holding the history in memory. Both end in the same `catch_up` pass over the
+/// same nodes, so neither is a second implementation of catching up.
+pub trait CatchUp {
+    /// Hand each chunk to `apply`, in order.
+    ///
+    /// An implementation that yields nothing must still call `apply` once, with an empty delta: that pass
+    /// is the *prime* a grand total's always-present row depends on (S-33, D-20).
+    fn feed(self, apply: &mut dyn FnMut(&EpochDeltas) -> Result<()>) -> Result<()>;
+}
+
+impl CatchUp for &EpochDeltas {
+    fn feed(self, apply: &mut dyn FnMut(&EpochDeltas) -> Result<()>) -> Result<()> {
+        apply(self)
+    }
+}
+
+/// Catch up from a stream of per-epoch deltas, holding one epoch at a time.
+#[derive(Debug)]
+pub struct Chunks<I>(pub I);
+
+impl<I: IntoIterator<Item = EpochDeltas>> CatchUp for Chunks<I> {
+    fn feed(self, apply: &mut dyn FnMut(&EpochDeltas) -> Result<()>) -> Result<()> {
+        let mut fed = false;
+        for chunk in self.0 {
+            fed = true;
+            apply(&chunk)?;
+        }
+        if !fed {
+            apply(&EpochDeltas::new())?;
+        }
+        Ok(())
+    }
+}
+
 /// The memo: one dataflow, many standing queries.
 #[derive(Debug)]
 pub struct Memo {
@@ -170,9 +208,14 @@ pub struct Memo {
     refs: BTreeMap<NodeId, usize>,
     /// The accumulated input, per table — what a query registering mid-history is caught up with.
     ///
-    /// This is the memory price of mid-history attach, and it is the *data*, once, not per node. C7's
-    /// Parquet ground truth and log compaction are where this stops being a `BTreeMap` in RAM.
-    inputs: BTreeMap<String, ZSetBatch>,
+    /// `None` when the memo keeps **no** input cache: a caller that has the accumulated input elsewhere
+    /// — a server with C7's snapshot and log suffix on disk — passes it to [`Memo::register_from`] and
+    /// this memo holds none of the data. That is what makes a memo runnable under a memory ceiling its
+    /// data exceeds, which C8 named as the one part of its claim a memo could not make (C9's discharge
+    /// of that pointer).
+    ///
+    /// With a cache, this is the memory price of mid-history attach: the *data*, once, not per node.
+    inputs: Option<BTreeMap<String, ZSetBatch>>,
     registrations: BTreeMap<Handle, Registration>,
     next_handle: u64,
     /// Where every operator's state comes from. One factory for the memo's whole life: a shared node's
@@ -197,17 +240,53 @@ impl Memo {
         sharing: Sharing,
         factory: Box<dyn schweep_state::BackendFactory>,
     ) -> Result<Memo> {
+        Memo::build(catalog, sharing, factory, true)
+    }
+
+    /// A memo that keeps **no** accumulated input in memory (C9).
+    ///
+    /// Catch-up for a late registration then has to come from the caller — [`Memo::register_from`] — and
+    /// the caller is expected to source it from C7's snapshot plus the retained log suffix, on disk.
+    /// [`Memo::register`] refuses on such a memo rather than silently registering a query that would
+    /// answer only for epochs after it arrived, which is the failure this constructor exists to make
+    /// impossible.
+    ///
+    /// This is what lets a memo run under a memory ceiling its *data* exceeds — the gap C8 named.
+    pub fn without_input_cache(
+        catalog: Catalog,
+        sharing: Sharing,
+        factory: Box<dyn schweep_state::BackendFactory>,
+    ) -> Result<Memo> {
+        Memo::build(catalog, sharing, factory, false)
+    }
+
+    fn build(
+        catalog: Catalog,
+        sharing: Sharing,
+        factory: Box<dyn schweep_state::BackendFactory>,
+        cache_inputs: bool,
+    ) -> Result<Memo> {
         Ok(Memo {
             dataflow: Circuit::empty()?,
             sharing,
             catalog,
             by_hash: BTreeMap::new(),
             refs: BTreeMap::new(),
-            inputs: BTreeMap::new(),
+            inputs: if cache_inputs {
+                Some(BTreeMap::new())
+            } else {
+                None
+            },
             registrations: BTreeMap::new(),
             next_handle: 0,
             factory,
         })
+    }
+
+    /// Whether this memo keeps the accumulated input in memory.
+    #[must_use]
+    pub fn caches_inputs(&self) -> bool {
+        self.inputs.is_some()
     }
 
     /// What the operators' state is kept in — for `EXPLAIN STATE`'s header and its reconciliation.
@@ -243,8 +322,61 @@ impl Memo {
         self.register(&plan, Admission::bounded())
     }
 
-    /// Register a plan as a standing query.
+    /// Register a plan as a standing query, catching it up from the memo's own input cache.
     pub fn register(&mut self, plan: &CircuitPlan, admission: Admission) -> Result<Handle> {
+        if self.inputs.is_none() {
+            return Err(MemoError::NoInputCache);
+        }
+        let catch_up = self.accumulated_deltas()?;
+        self.register_from(plan, admission, &catch_up)
+    }
+
+    /// Register a plan, catching it up from an input the **caller** supplies (C9).
+    ///
+    /// The caller owns the accumulated input, which is what lets it come from C7's snapshot and the
+    /// retained log suffix rather than from this memo's memory. Passing an input that is *not* the
+    /// accumulated history would register a query that answers something no oracle agrees with, so the
+    /// obligation is the caller's and it is stated: **`catch_up` must be the accumulated contents of
+    /// every table as of the memo's current epoch.**
+    pub fn register_from(
+        &mut self,
+        plan: &CircuitPlan,
+        admission: Admission,
+        catch_up: &EpochDeltas,
+    ) -> Result<Handle> {
+        self.register_catching_up(plan, admission, catch_up)
+    }
+
+    /// Register a plan, catching it up from a **stream** of per-epoch deltas (C9).
+    ///
+    /// The difference from [`Memo::register_from`] is memory, and it is the difference C8's forward
+    /// pointer was about: one accumulated delta is O(history) resident, while a chunk per epoch is
+    /// O(largest epoch). A late registration can therefore catch up over more input than the process is
+    /// allowed to hold, which is what `testing/soak/tests/c9_memo_ceiling.rs` measures.
+    ///
+    /// **The chunks must be the epochs, in order.** Each chunk is applied by the same pass the live path
+    /// takes, so N chunks reach the state N sealed epochs would — which is not merely equivalent to one
+    /// accumulated delta but *identical to the live path*, emission counters included. An out-of-order or
+    /// overlapping chunk sequence would build a state no history explains, and no oracle would agree
+    /// with it.
+    ///
+    /// An empty stream still primes (S-33, D-20): a grand total's always-present row exists before any
+    /// epoch is sealed, and the prime is the pass that puts it there.
+    pub fn register_from_chunks(
+        &mut self,
+        plan: &CircuitPlan,
+        admission: Admission,
+        chunks: impl IntoIterator<Item = EpochDeltas>,
+    ) -> Result<Handle> {
+        self.register_catching_up(plan, admission, Chunks(chunks))
+    }
+
+    fn register_catching_up(
+        &mut self,
+        plan: &CircuitPlan,
+        admission: Admission,
+        catch_up: impl CatchUp,
+    ) -> Result<Handle> {
         let canonical = canonicalize(plan);
 
         // ---- 1. instantiate every node of the plan, fresh -------------------------------------
@@ -268,12 +400,17 @@ impl Memo {
         //
         // Always, not only when the epoch is past zero: at epoch 0 the accumulated input is empty and
         // this pass is the *prime* that gives a grand total its always-present row (S-33, D-20).
-        let catch_up = self.accumulated_deltas()?;
-        if let Err(error) = self.dataflow.catch_up(&catch_up, &fresh) {
+        let dataflow = &mut self.dataflow;
+        let outcome = catch_up.feed(&mut |deltas| {
+            dataflow
+                .catch_up(deltas, &fresh)
+                .map_err(MemoError::Circuit)
+        });
+        if let Err(error) = outcome {
             // A failed registration must leave nothing behind. Everything it built is private by
             // definition — nothing else has had a chance to reference it yet.
             self.abandon(sink, &fresh);
-            return Err(error.into());
+            return Err(error);
         }
 
         // ---- 3. attach to what already exists, free the duplicates ----------------------------
@@ -358,14 +495,23 @@ impl Memo {
     /// The input is accumulated first, so a query registering later can be caught up to here; then the
     /// dataflow takes one pass and every sink folds in its own delta.
     pub fn seal_epoch(&mut self, deltas: &EpochDeltas) -> Result<Epoch> {
-        for (table, entries) in deltas.tables() {
-            let schema = self.table_schema(table)?;
-            let batch = ZSetBatch::from_entries(schema, entries.clone())?;
-            let merged = match self.inputs.get(table) {
-                Some(held) => held.add(&batch)?.consolidate()?,
-                None => batch.consolidate()?,
-            };
-            self.inputs.insert(table.clone(), merged);
+        if self.inputs.is_some() {
+            for (table, entries) in deltas.tables() {
+                let schema = self.table_schema(table)?;
+                let batch = ZSetBatch::from_entries(schema, entries.clone())?;
+                let held = self
+                    .inputs
+                    .as_ref()
+                    .and_then(|cache| cache.get(table))
+                    .cloned();
+                let merged = match held {
+                    Some(held) => held.add(&batch)?.consolidate()?,
+                    None => batch.consolidate()?,
+                };
+                if let Some(cache) = self.inputs.as_mut() {
+                    cache.insert(table.clone(), merged);
+                }
+            }
         }
         Ok(self.dataflow.step(deltas)?)
     }
@@ -585,10 +731,11 @@ impl Memo {
         }
     }
 
-    /// The whole accumulated input, as one delta.
+    /// The whole accumulated input, as one delta — from the cache, when there is one.
     fn accumulated_deltas(&self) -> Result<EpochDeltas> {
         let mut deltas = EpochDeltas::new();
-        for (table, batch) in &self.inputs {
+        let cache = self.inputs.as_ref().ok_or(MemoError::NoInputCache)?;
+        for (table, batch) in cache {
             let entries: Vec<(Row, i64)> = batch.canonical()?.entries().to_vec();
             deltas.extend(table.clone(), entries);
         }
