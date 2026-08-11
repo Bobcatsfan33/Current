@@ -65,14 +65,26 @@ byte-identical logical state.
 `EXPLAIN STATE` reports what every operator of every query is holding, and a gate checks the report
 against the backends themselves rather than trusting it.
 
-**What does not exist yet:** no server (C9). Nothing here is usable as a database today, and nothing here is
+**There is a server.** `schweepd` is one process over the embedded engine, reached over HTTP: ingest, seal,
+register, read, subscribe, one-shot, transaction. Two things make that claim worth reading. First, the
+**differential harness runs over the socket**: 2,028 generated scenarios, 11,544 answer comparisons, every
+answer checked byte for byte against the oracle through a real listener — and the network, SQL and typed
+doors are proven to compile to one plan and do the same work, counter for counter. Second, the server is
+**killed for real**: `SIGKILL` at 1,000 random points under concurrent ingest, read and subscribe load, and
+after every one of them each acknowledged batch is applied in exactly one epoch and the recovered state is
+byte-identical to a never-crashed twin, emission counters included. The subscriber is killed too, as a real
+process, and resumes from its token with no epoch delivered twice and none lost.
+
+**What does not exist yet:** Arrow Flight (deferred to C13 — the endpoints are the contract, not the
+framing), and everything from C10 on. Nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
 group's whole value multiset, and `schweep-oracle` is *deliberately* slow, because its job is to be
 obviously correct, not quick.
 
 **Numbers we publish:** the memory figures above, and only those. Each traces to a committed artifact in
-`testing/evidence/` — `c8-state-costs.json` (deterministic, recomputed by a test) and
-`c8-cache-sweep.json` (machine-dependent, and labelled as such). **No performance claim** is made:
+`testing/evidence/` — `c8-state-costs.json` and `c9-bounds.json` (deterministic, both recomputed by a
+test), `c8-cache-sweep.json`, `c9-memo-ceiling.json` and `c9-soak.json` (machine-dependent, and labelled as
+such). **No performance claim** is made:
 nothing here is benchmarked for throughput or latency, per invariant I-10. When they exist
 they will live in `testing/evidence/` and be linked from here, with the worst supported
 configuration quoted alongside the best.
@@ -110,6 +122,7 @@ crates/schweep-circuit/  the circuit: DAG wiring, epochs, step scheduler, result
 crates/schweep-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
 crates/schweep-memo/     canonicalization, structural hashing, the standing-query registry
 crates/schweep-batch/    one-shot queries, Parquet snapshots, log compaction, bootstrap
+crates/schweep-server/   schweepd: the endpoints, admission, subscriptions, and a client for them
 testing/soak/            the soak harness: RSS sampled across a run, at a fixed memory ceiling
 crates/schweep-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
 crates/schweep-log/      the input log: a directory of files, epoch sealing, exactly-once admission
@@ -122,18 +135,30 @@ docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 `schweep-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
-**Known limitations, before you find them:** state can **spill** but it cannot be **checkpointed** at
+**Known limitations, before you find them:** **a running `schweepd` holds its whole retained log in
+memory.** `Log` keeps every sealed batch resident plus one dedup token per append, so resident memory is
+O(retained log) however long the process runs — measured at 1,589 bytes an epoch with nothing else running
+(`c9-soak.json`), which is why the soak asserts a per-epoch coefficient rather than a flat curve. C10's
+work, and `schweep_log::stream::Epochs` is already the streaming reader such a log would use; C9's
+memo-ceiling gate streams a late registration's catch-up through it over 269 MB of input with a 47.2 MB
+peak — a sixth of the input, and a twenty-second of the 1.08 GB of state it builds. **Compaction is refused in the server**, deliberately: recovery derives its epoch by replaying
+retained epochs, so a compacted prefix would report right answers under wrong epoch numbers, and
+`Engine::open` stops instead. **The retained subscription deltas are not durable** — a subscriber that
+falls behind and then meets a server restart is refused and must re-read the answer, which is durable.
+**An acknowledgement that precedes the `fsync` is invisible to our tests**, and that is measured rather
+than assumed: the same 60-cycle kill matrix passes green with every `fsync` skipped, because `SIGKILL`
+does not touch the page cache. `docs/DURABILITY.md` carries the table of what is and is not covered.
+Also: state can **spill** but it cannot be **checkpointed** at
 that size — the frozen trait's `snapshot` returns a byte vector, so a checkpoint materialises every entry
 (D-18 records the cost). A single operation is not bounded either: a prefix scan returns a vector, and an
 aggregate folds a changed group's whole multiset, so a group with a million rows costs a million entries
-per epoch that touches it — C10's work. A memo cannot yet run under a ceiling its *data* exceeds, because
-it keeps the accumulated input in memory for mid-history catch-up. **Nothing decides when to compact** — compaction is a
+per epoch that touches it — C10's work. **Nothing decides when to compact** — compaction is a
 function somebody calls, and a policy is a tuning question C8 owns with a receipt. A snapshot holds
 rows, not provenance: `source_id` travels with every batch but is not carried into the snapshot, which
-C11's source-scoped retraction will need. The memo is **not durable** — its shape is the set of
-queries registered right now, and recovering a registry means re-registering, which costs one
-recomputation per query. Registering a standing query is O(data) by design; maintaining it is
-O(change). The SQL door is narrower than the typed API in one
+C11's source-scoped retraction will need. A memo is **not checkpointable** — its shape is the set of queries registered at the time, so
+`schweepd` recovers a registration by rebuilding it from the log rather than from a checkpoint (D-22),
+which costs one recomputation per query. Registering a standing query is O(data) by design; maintaining it
+is O(change). The SQL door is narrower than the typed API in one
 specific way — a query that both groups and projects cannot be written in SQL, because a group key's
 output name comes from the select list (S-11, S-36) — and the gate counts how much of its population
 that excludes rather than passing over it in silence. There is no non-integer
@@ -141,8 +166,8 @@ arithmetic at all: `Float64` is a result-only type produced solely by `AVG`, and
 are open question **Q-1**. `MemBackend`'s prefix scan is a linear walk, which is the wrong complexity
 for a join, and nothing has been benchmarked. **`RocksBackend` is not implemented** — D-5 calls for
 it and C4 could not build it in the development environment; `MemBackend` plus checkpoint files is what
-durability is proven over today (**D-18**, amended by **D-19** to redb). Nothing tests *power loss*: the crash harness is
-in-process, which models losing unwritten state at a named instant but not kernel write reordering.
+durability is proven over today (**D-18**, amended by **D-19** to redb). Nothing tests *power loss*: the C4 harness is in-process, and C9's
+`SIGKILL` matrix — 1,000 real process kills — models a dying process but not a dying machine.
 
 Crates named in §5 that do not appear above have not been written yet.
 

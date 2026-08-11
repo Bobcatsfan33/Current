@@ -81,8 +81,18 @@ A PR that cannot name all three is not ready.
 | `clippy` | `cargo clippy --all-targets --all-features -- -D warnings` | warnings are errors |
 | `test` | `cargo test --workspace --all-features` | correctness, including the differential gate |
 | `no-network` | build + test with the network removed (`--offline`, locked deps) | the build must be reproducible and must not fetch at test time |
+| `state-ceiling` | the C8 gate under a fixed 128 MiB cgroup | operator state ten times the ceiling, with flat memory |
+| `memo-ceiling` | the C9 gate under a fixed 128 MiB cgroup | a query registered *late*, catching up over more input than the process may hold |
 
-All four must be green. Locally green is not done; CI green is done.
+All six must be green — the aggregate `ci` check is the one to point branch protection at. Locally
+green is not done; CI green is done. Two more jobs run **on a schedule** and deliberately do not gate a
+push: `nightly-full-sync` (the crash gate with every write fsynced) and `nightly-soak` (10,000 epochs of
+server load, with the RSS curve sampled per epoch).
+
+**One thing to know about `no-network`.** It runs the suite inside `unshare -rn`, and C9's gates bind
+`127.0.0.1`. A fresh network namespace has a loopback interface that exists but is *down*, so the job
+brings `lo` up before running — loopback is not the network that job is about, and the step that proves
+the outside world is unreachable is unaffected by it.
 
 ## The rules that get PRs rejected
 
@@ -105,7 +115,7 @@ All four must be green. Locally green is not done; CI green is done.
 Always, without exception:
 
 1. **`docs/SEMANTICS.md`** — decide it, write it down, say why.
-2. **`current-oracle`** — implement it the slow, obvious way.
+2. **`schweep-oracle`** — implement it the slow, obvious way.
 3. **The engine** — implement it the fast way, and let the differential harness prove they agree.
 
 When the differential harness disagrees with you, the harness is right until proven otherwise,
@@ -122,6 +132,19 @@ cargo test --workspace --all-features
 The differential gate (1,000 randomized scenarios) runs as part of `cargo test`. Every scenario
 is reproducible from its seed: a failure prints the seed, and re-running that seed reproduces the
 failure byte-for-byte. If it does not, that is itself a bug — report it as one.
+
+Two of the gates are slow enough to be worth naming, because `cargo test` runs them and a first-time
+contributor should know why the suite takes minutes:
+
+```bash
+# The harness over a real socket: 2,028 scenarios, 11,544 answer comparisons (~2.5 min)
+cargo test -p schweep-differential --test c9_network -- --nocapture
+
+# 1,000 real SIGKILLs of a schweepd subprocess under load (~3 min)
+cargo test -p schweep-server --test kill9 -- --nocapture --test-threads=1
+# ... or a shorter loop while iterating:
+SCHWEEP_KILL9_CYCLES=25 cargo test -p schweep-server --test kill9 -- --nocapture --test-threads=1
+```
 
 ---
 

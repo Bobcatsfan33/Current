@@ -345,3 +345,44 @@ What exists is in-process fault injection, and only that. The real-kill test's j
 in-process model is faithful — is **scheduled at C9**, whose exit gate is `kill -9` under load at 1,000
 random points. Until then, no count in `docs/PROGRESS.md` should be read as a count of process kills,
 and each is reported separately rather than added together.
+
+### C9: the real kills exist — what they retire, and what they do not
+
+`crates/schweep-server/tests/kill9.rs` spawns `schweepd` as a subprocess and `SIGKILL`s it at **1,000**
+points under concurrent ingest, read and subscribe load, then restarts on the same directory. Per cycle it
+asserts that every token the server acknowledged before the kill is applied in exactly one epoch (I-4), and
+that the recovered state equals a never-crashed twin fed the same log — the **full** fingerprint, emission
+counters included (I-7). Measured on the committed run: 1,000 kills, 24,219 acknowledged appends verified
+exactly-once, 6,459 epochs recovered, and 968 of the 1,000 cycles killed between an acknowledgement and a
+seal — the position that matters most — with 32 killed before any acknowledgement at all. A concurrent
+subscriber was delivered 5,459 epochs across the run and none of them twice.
+
+Two runs of the finished code produced those same counts, which is the seeded half working as intended: the
+workload and the kill *point* (a count of acknowledged appends) are functions of the seed, so the set of
+batches the server promised is reproducible. The instruction the signal lands on is not, and that is the
+property under test.
+
+**What this retires.** The limit above — "it is not 10,000 process kills" — is retired for the *class of
+failure a dying process produces*: a real `SIGKILL` at an arbitrary instruction, with the OS doing whatever
+it does to a dying process, is now exercised a thousand times, and the in-process model's verdicts agree
+with the real one's. The counts stay reported separately, as the correction above requires.
+
+**What it does not retire, demonstrated rather than asserted.** `SIGKILL` kills a process; it does not
+touch the page cache. A write this process issued is still visible to the next process even if no `fsync`
+had returned — so the matrix **cannot see an acknowledgement sent before the durable write reaches the
+disk.** That was measured, not reasoned about: running the same 60-cycle matrix with the log at
+`SyncPolicy::Deferred` — which is exactly "acknowledge before the `fsync` returns" — passes, green, with
+1,620 acknowledged appends "verified". The mutation is invisible to this harness by construction.
+
+So the standing limit is narrower than it was, and it is now precisely statable:
+
+| Failure | Modelled by | Status |
+| --- | --- | --- |
+| loss of in-memory state at a named instant | C4's 26 seams, 10,000 cycles | covered |
+| a process dying at an arbitrary instruction, under load | C9's 1,000 real `SIGKILL`s | **covered** |
+| an ack that precedes the `fsync` | nothing — `SIGKILL` preserves the page cache | **not covered**, and measured to be invisible |
+| power loss, a lying disk cache, torn media | nothing | **not covered** |
+
+The last two need a machine that loses power or a filesystem that lies, and neither is in this repository.
+Until one is, `SyncPolicy::Full` is a claim resting on the operating system's contract rather than on a test
+of ours, and this table is what a reader should see before they trust it.

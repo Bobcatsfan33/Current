@@ -14,7 +14,8 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C6** — the memo: standing queries and shared circuitry | **complete; exit gate green in CI** |
 | **C7** — one-shot queries, Parquet ground truth, compaction | **complete; exit gate green in CI** |
 | **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18's freeze now FINAL** |
-| C9 … C13 | not started |
+| **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
+| C10 … C13 | not started |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
 > while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
@@ -1523,3 +1524,189 @@ instrument rather than a looser threshold. That is the whole reason for applying
 - **`EpochDeltas` still has not moved to `schweep-log`.** Named in C4, C5, C6 and C7.
 
 Per the sprint protocol in `CLAUDE.md`, **C9 does not begin in the session that finished C8.**
+
+---
+
+## C9 — `schweepd`: one process over the embedded engine
+
+**Objective (§6):** put the engine behind a wire. Two decisions doc-first — what a registration means
+across a crash, and what the wire contract *is* — then one process, per-source admission with real
+backpressure, and the gates that make "it survives a crash" a measured claim rather than a design.
+
+This is also the sprint that pays four standing debts: C6's registry-durability pointer, C4's *"no real
+`kill -9` test"*, C8's *"a `Memo` under a ceiling is untested"*, and MutinyDB's MD-2 ask 3.
+
+### The two decisions, recorded before any server code
+
+| Decision | What it settles |
+| --- | --- |
+| **D-22** · a registration is server-owned and durable | `schweepd` persists the registry and rebuilds by bootstrap; a handle means the same query after a crash; an unbindable plan is **quarantined**, not dropped. Client-leasing rejected on two grounds, both stated |
+| **D-23** · the wire contract | HTTP/1.1 by hand (Arrow Flight **deferred to C13**, with reasons); five error kinds of which exactly one is retryable; the resume token **is** the epoch number and the server holds no cursor; pull, not push. **MD-2 ask 3 shipped** as `POST /txn` |
+
+Both grew addenda during implementation, and each addendum exists because a gate disproved a sentence
+rather than because prose was tidied:
+
+- **D-22 addendum** — recovery is **bootstrap only**. The first restart test answered `SUM = 20` where it
+  should have answered `10`: the redb state store survived on disk *and* the bootstrap hydrated the same
+  input on top of it. `Circuit::snapshot`'s own doc says a memo cannot be restored through it (its shape is
+  the set of queries registered at the time), so the checkpoint is not the recovery path here — the state
+  store is deleted on open, and the checkpoint's remaining job is C7's compaction anchor. Said out loud,
+  because a checkpoint recovery ignores would otherwise read as a durability guarantee.
+- **D-23 addendum, one** — **deltas are not durable; the answer is.** The retained deltas are an in-memory
+  ring, so a server restart empties them and a *lagging* subscriber is refused (`TokenTooOld`) and must
+  re-baseline. Exactly-once-per-epoch holds within a server's lifetime and across a *subscriber's* crash.
+- **D-23 addendum, two** — **one bound is not a bound.** Measuring the queue bound for the ledger showed a
+  count of batches bounds nothing: 64 batches of the widest measured batch is 32.9 MB for one source, and
+  a client picks the width. Both queues now carry a byte bound beside the count, and a batch larger than
+  the whole budget is `Refused` rather than `Overloaded` — because the one promise `Overloaded` makes is
+  that backing off can work.
+
+### The exit gate
+
+| Gate condition (§6 C9) | Proven by | Result |
+| --- | --- | --- |
+| The differential harness runs **over the network**, green vs the oracle | `the_network_door_agrees_with_the_oracle_over_the_whole_renderable_population` | **2,028 scenarios, 9,516 epochs, 11,544 answer comparisons** over real sockets, every family, retractions included, 122 error answers crossing as errors |
+| Same-door extends: network, SQL and typed doors produce identical **plans** | `the_three_doors_produce_one_plan` | 52 scenarios, structural hash **and** structural form identical through all three |
+| … and identical **counters** (I-6) | `the_network_door_does_the_same_work_as_the_typed_door` | 52 scenarios, 248 epochs compared counter for counter |
+| **THE REAL `kill -9`**: ≥1,000 random points under concurrent ingest + query + subscribe | `a_killed_schweepd_recovers_exactly_once_and_matches_its_never_crashed_twin` | **1,000 real `SIGKILL`s**, 24,219 acknowledged appends verified exactly-once, 6,459 epochs recovered, 5,459 epochs delivered to the subscriber with none twice; 968 cycles killed *between* an ack and a seal and 32 before any acknowledgement at all |
+| Every acked batch in exactly one epoch after restart (I-4) | the same gate, per cycle | the workload makes it readable: token *i* appends row `(i, 1)`, so a doubled application reads `(i, 2)` |
+| Recovery equals the never-crashed twin (I-7) | the same gate, per cycle | the **full** fingerprint, emission counters included — no relaxation |
+| No subscriber receives an epoch twice after resume | `every_sealed_epoch_is_delivered_exactly_once_on_every_polling_schedule`, and the kill matrix's own subscriber | four polling schedules × 12 epochs, delivered epochs exactly `1..=12` on each; and in the matrix, delivery is strictly increasing before the kill and a resume at the recorded token either delivers only later epochs or is `Rejected` |
+| Subscriber crash: kill the **subscriber** mid-stream, resume by token | `a_killed_subscriber_resumes_by_token_without_a_duplicate_or_a_gap` | **24 real `SIGKILL`s of a real subscriber process**, 40 epochs each, all 24 landing mid-stream; journal across the resume is every epoch exactly once |
+| A `Memo` registers a late query under the ceiling, input exceeding it | `a_late_registration_catches_up_over_more_input_than_the_ceiling_inside_its_budget` | **269 MB of accumulated input, 1.08 GB of state, peak RSS 47.2 MB** — a sixth of the input it streamed — with resident growth across the catch-up between 0% and 3.1% of that input over four runs |
+| … and answers what the oracle answers | `a_late_registration_answers_what_the_oracle_answers` | oracle, an epoch-0 registration and a late registration agree byte for byte over 30 epochs |
+| Soak: a full window under load, RSS curve within shape **and** budget | `a_server_under_load_for_a_full_window_does_not_leak_per_epoch` | 3,000 epochs, **1,513–1,810 bytes/epoch against a 4,096 budget** over three runs, attributed — and the *shape* half is the slow-consumer gate's budget plus the coefficient here, because a server's curve is not flat and cannot be (see below) |
+| `DURABILITY.md` records which limits this retires and which remain | `docs/DURABILITY.md` §"C9: the real kills exist" | a four-row table; power loss still **not covered**, and said so |
+
+**What is reproducible about the kill matrix, and what is not.** Two 1,000-cycle runs of the finished code
+reported the *same* figures — 24,219 acknowledged appends, 6,459 epochs recovered, 32 cycles killed before
+any acknowledgement, 968 killed between an acknowledgement and a seal. That is the seeded half doing its
+job: the workload and the kill *point* (a count of acknowledged appends) come from the seed, so the set of
+batches the server promised is a function of the seed. What is not reproducible, deliberately, is the
+machine instruction the signal lands on — which is the property under test, and the reason every assertion
+is written to hold for any position.
+
+Zero-flake held: every network test binds `127.0.0.1:0` and reads the port back, no test sleeps, and
+readiness is always an event (a port file the child wrote after binding, or a response) rather than a wait.
+Every RSS-measuring test is its own test binary, for the reason finding 4 below records.
+
+**CI gained two jobs and a nightly.** `memo-ceiling` runs the C9 ceiling gate under a fixed 128 MiB cgroup,
+the same discipline as C8's `state-ceiling`, and both are in the aggregate `ci` check's `needs`.
+`nightly-soak` runs a 10,000-epoch window on a schedule and deliberately does not gate a push. The
+`no-network` job needed one change: a fresh network namespace has a loopback interface that exists but is
+*down*, so it brings `lo` up and proves it can — loopback is not the network that job is about, and the step
+that establishes the outside world is unreachable is unaffected by it.
+
+### The teeth: three mutations, marker-grepped and reverted
+
+`grep -rn MUTANT crates testing` was run before each cycle and after each revert, and is empty now.
+
+| Mutation | Caught by | What it also revealed |
+| --- | --- | --- |
+| **(a) resume-token off-by-one** — `delta.epoch >= from` instead of `> from` | the exactly-once gate (`epochs != 1..=12` on every schedule), the redelivery gate, **and** the real subscriber-crash gate, which failed on cycle 0 | nothing new: three instruments, all of them looking at the right thing |
+| **(b) ack before the durable append returns** — the batch is held and appended on the *next* ingest | the **kill -9 matrix**, naming the token: *"t12 was acknowledged before the kill and is not in the recovered answer exactly once"* | it is also caught by ordinary answer tests, because deferring an append by one batch changes what the next epoch answers |
+| **(b′) ack before the `fsync` returns** — the log at `SyncPolicy::Deferred` | **nothing.** 60 real `SIGKILL`s pass, green, "verifying" 1,620 acknowledged appends | `SIGKILL` does not touch the page cache, so this class is **invisible to this harness by construction**. Measured rather than reasoned about, and now the standing limit in `DURABILITY.md` |
+| **(c) backpressure removed** — `check` always admits | the slow-consumer gate's **RSS budget** (45.9 MB against 32 MiB) *and* its refusal count | the budget was 160 MiB at first and the mutation slipped under it: only the refusal count caught it, and the budget — the instrument §6 asked for — watched it happen. It is now set between the two measured peaks |
+
+Mutation (b′) is the most valuable result in this sprint. C4 said the `kill -9` test would close the
+ack-before-durable-write question; it closes half of it, and the other half is now *demonstrated* to be out
+of reach here rather than assumed to be covered.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| Every endpoint round-trips: register, ingest, seal, read, subscribe, deregister | `the_endpoints_round_trip` |
+| Every error kind is reachable over the wire, and exactly one is retryable | `every_error_kind_is_reachable_and_only_one_is_retryable` |
+| A source at its bound is refused, a seal frees it, and a noisy source does not starve a quiet one | `a_full_queue_refuses_and_a_seal_frees_it` |
+| A source is bounded in **bytes**, and an unfittable batch is `Refused` rather than invited to retry | `a_source_is_bounded_in_bytes_and_an_oversized_batch_is_refused_not_retried` |
+| A registration, its admission and its answer survive a restart; handles are never reissued (D-22) | `a_registration_and_its_answer_survive_a_restart` |
+| A registration that no longer binds is quarantined, names what broke, and can be cleared | `a_registration_that_no_longer_binds_is_quarantined_and_not_dropped` |
+| `/txn` seals N batches into one epoch, and a refusal partway seals nothing and rolls nothing back | `a_transaction_seals_its_batches_into_one_epoch_and_says_what_it_does_not_guarantee` |
+| `/txn` and N×append+seal produce the same epoch and the same counters | `the_transaction_and_the_append_seal_path_produce_the_same_epoch` |
+| Shutdown reports its drain, and the next start continues from it | `shutdown_reports_its_drain_and_recovery_continues_from_it` |
+| A one-shot needs no registration and agrees with an incremental answer over the same data | `a_one_shot_query_needs_no_registration` |
+| Re-subscribing from an old token redelivers the same bytes | `resubscribing_from_an_old_token_redelivers_the_same_bytes` |
+| A token from the future comes back unchanged, never rewound | `a_token_from_the_future_is_not_silently_accepted` |
+| A token behind the ring is refused and names the oldest epoch the server has | `a_token_behind_the_ring_is_refused_and_names_the_oldest_epoch_it_has` |
+| A subscriber behind the ring exits on the refusal rather than believing itself caught up | `a_subscriber_that_falls_behind_the_ring_is_refused_rather_than_told_it_is_caught_up` |
+| A recovered server agrees with its own log, and with the same directory opened in-process | `a_recovered_server_agrees_with_its_own_log` |
+| A streamed segment yields exactly what the log holds, and stops where the log stops | `crates/schweep-log/tests/stream.rs` (4 tests, including every truncation point and a flipped byte) |
+| A damaged registry is an error and never an empty one; an admission reason survives the file's own delimiters | `a_damaged_registry_is_an_error_and_never_an_empty_one`, `an_admission_reason_survives_spaces_percents_and_the_files_own_delimiters` |
+| A slow consumer is refused rather than buffered, inside an RSS budget | `a_slow_consumer_is_refused_rather_than_buffered` |
+| Two servers fed the same requests hold byte-identical state, counters and plans (I-2) | `two_servers_fed_the_same_requests_are_byte_identical` |
+| C9's deterministic measurements still describe the wire, and the ledger's values match the code | `the_c9_bounds_artifact_still_describes_the_wire` |
+
+### Five things the gates found
+
+1. **Recovery applied every input twice** (D-22 addendum). Found by the first restart test, before any
+   crash gate existed. The redb store survived a restart and bootstrap hydrated on top of it.
+2. **`pending_appends` reported 0 after a restart.** Found by the kill -9 matrix's *coverage* assertion —
+   "no cycle was killed between an acknowledgement and a seal" — which was true only because the number it
+   read was wrong: the count was tracked in memory and reset on open. It is now read from the log, which is
+   the thing that survived. A server holding acknowledged, unsealed batches used to describe itself as
+   holding none.
+3. **`Log` holds the whole history resident.** Found by the memo-ceiling gate, which peaked at 342 MB
+   streaming 269 MB of input *through a `Log`* while the catch-up's own footprint was a fraction of it. `Log` keeps every sealed
+   batch in memory (`sealed: Vec<Vec<Batch>>`) plus a dedup token per append. The gate now streams the
+   segment (`schweep_log::stream::Epochs`, new in C9) and peaks at 47.2 MB. **The limit itself is not
+   fixed** — see below.
+4. **An RSS gate cannot share a test binary.** The memo-ceiling gate passed alone and failed the
+   full-workspace run at 123.9 MB against a 96 MiB budget: resident memory is a property of the *process*,
+   and its correctness-test sibling in the same binary had already grown the allocator. Worse, the earlier
+   "flat curve" reading was itself an artifact of that pollution — the baseline was pre-warmed, so a real
+   step looked like a plateau. Every RSS-measuring test is now its own binary, and both files say why.
+5. **Two of C9's own growth assertions were in the wrong unit.** `Curve::growth` returns a *fraction*, and
+   the new gates compared it against `25.0` and `10.0` while printing it as a percentage — allowances of
+   2,500% and 1,000%, displayed as "+2.2%" and "+1.4%". C8's gate had it right (`growth <= 0.10`, printed
+   `* 100.0`), so this was new code getting an old thing wrong, and it surfaced only when a *different*
+   assertion finally fired and the failure message was read closely. Both are fixed, and both sites now
+   state that the value is a fraction. **The lesson is about the print, not the threshold:** a number
+   displayed in the wrong unit made a broken assertion look reasonable every time it passed.
+
+### What C9 does **not** prove
+
+- **A catch-up costs a small residue per *pass*, and what the residue is has not been established.** Three
+  probes in `testing/evidence/c9-memo-ceiling.json` separate the cause: 349 chunks of five rows still climb
+  in every quarter (~1.2 KB a chunk), 349 chunks of 750 padded rows climb further (~12 KB a chunk), and 60
+  chunks carrying the same total data **do not climb at all**. So it is per pass, not per byte of state, and
+  it is a few percent of whatever a chunk carries — the signature of retained allocator arenas or of redb's
+  per-commit bookkeeping, and *not* proven to be either. It bounds how long a history one catch-up can
+  cross, so the gate asserts a coefficient (growth under 12.5% of the input streamed; measured 0–3.1%)
+  rather than the flatness it cannot honestly claim. **Scheduled: C10.**
+- **`schweepd`'s resident memory is O(retained log), and no soak can make it flat.** The finding above is a
+  property of `Log`, not of the gate that found it: a server that has been up for a million epochs holds a
+  million epochs' batches. The soak therefore asserts a per-epoch *coefficient* (1,513–1,810 bytes measured
+  over three runs against a 4,096 budget, attributed in `testing/evidence/c9-soak.json`) rather than
+  flatness. **Scheduled:
+  C10** — the fix is a log that holds an index and reads batches on demand, and `stream::Epochs` is already
+  the reader such a log would use.
+- **Compaction is refused in the server, deliberately.** `Engine::open` returns `Unsupported` if the log has
+  a compacted prefix, because recovery derives its epoch by replaying retained epochs and would report
+  answers under epoch numbers short by the prefix. Wrong epoch numbers on right answers is what I-3 exists
+  to prevent, so it stops instead of papering over it. **Scheduled: C10.**
+- **An ack that precedes the `fsync` is invisible here**, demonstrated by mutation (b′). Power loss, a lying
+  disk cache and torn media remain untested. `DURABILITY.md` carries the table.
+- **The server is single-threaded on purpose**, and that is not a performance claim — it is what keeps
+  everything past the ingest boundary deterministic (D-6). No throughput number is claimed anywhere; §6 C10
+  owns that with a benchmark.
+- **Arrow Flight does not exist**, and the endpoints are the contract rather than the framing (D-23).
+  **Scheduled: C13.**
+- **The retained deltas are not durable** (D-23 addendum). A lagging subscriber across a server restart is
+  refused, not served.
+- **`/explain-state` and `/counters` are diagnostic surfaces with no compatibility promise.** They exist
+  because the gates need them; their formats will change.
+- **The network differential gate is the renderable population, not the whole one.** 2,028 of 4,400 seeds
+  have a SQL form — the same set C5's gate covers, and the skipped count is reported by the gate itself.
+- **`EpochDeltas` still has not moved to `schweep-log`.** Named in C4, C5, C6, C7 and C8. Still true.
+
+### What C10 needs
+
+- **The log's resident footprint is the first thing to fix**, and it is now a measured number rather than a
+  suspicion: `testing/evidence/c9-soak.json` attributes 1,589 bytes an epoch to it with nothing else
+  running. `stream::Epochs` and its four tests are the reader half of the fix.
+- **Compaction in the server**, which needs an epoch that survives a compacted prefix — the `Unsupported`
+  refusal in `Engine::open` marks the exact spot.
+- **Sharing-is-timed and the overlapping-query-set generator**, both promised to C10 at C6's exit, both
+  still owed.
+- **A benchmark harness**, since every performance question in this document has been deferred to it.

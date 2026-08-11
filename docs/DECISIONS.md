@@ -448,6 +448,269 @@ prose across `ARCHITECTURE.md`, `CLAUDE.md`, `README.md`, and the `docs/`. Nothi
 is a grep, not a migration — and the absence of a migration is exactly why it happens now rather than
 after v0.1.
 
+### D-22 · A registration is **server-owned and durable**; a handle survives a restart
+
+*Sprint: C9, decided before any server code. Preserves: I-3, I-4, I-7. Discharges C6's forward-pointer
+("registry durability is decided doc-first in C9, because registrations are a client-facing surface").*
+
+**The decision.** `schweepd` **persists the registry** — each registration's canonical plan, its
+[`Admission`] record, and its handle — and rebuilds the circuits on recovery through C7's bootstrap
+(snapshot + retained log suffix). A handle issued before a crash **means the same query after it**.
+
+**The alternative, and why it lost.** Client-leased registrations — the client re-registers after a
+restart, the server remembers nothing — is simpler and was rejected on two grounds:
+
+1. **It makes the resume token meaningless.** A subscriber resumes at an epoch number (D-23) against
+   *a query*. If the query is gone until some client re-registers it, the token addresses nothing, and
+   the client cannot tell "your query is not registered yet" from "your query has no rows at that
+   epoch". Exactly-once per epoch would become exactly-once-per-epoch-provided-somebody-re-registered.
+2. **It moves a durability guarantee to the least reliable participant.** The log is durable and the
+   checkpoints are durable; making the *set of questions being asked* the one volatile part of the
+   system is the arrangement most likely to lose work, and it loses it silently — the server comes back
+   healthy and answers nothing.
+
+**What a handle is, precisely.** An opaque `u64`, unique for the life of the *data directory*, that
+names a registration in the persisted registry. Concretely, after a crash:
+
+| Situation | What the client sees |
+| --- | --- |
+| handle registered before the crash, registry intact | the same query, answering at the recovered epoch |
+| handle registered before the crash, its plan no longer binds (catalog changed under it) | `RegistrationUnbindable` at startup, the registration **quarantined** rather than dropped, and the handle reports that error until it is deregistered |
+| handle never registered, or deregistered | `UnknownHandle` |
+| handle from a *different* data directory | `UnknownHandle` — handles are not global, and the record says so rather than letting a stale client appear to work |
+
+**How it composes with the resume token.** The token is an epoch number (D-23). A handle plus a token is
+a complete cursor: the handle says *which* answer, the token says *how far the client has consumed*.
+Both survive a restart, which is what makes redelivery after resume idempotent rather than hopeful. A
+client holding `(handle, token)` across a crash needs no other state, and that is the property the
+subscriber-crash gate tests.
+
+**What it costs.** Recovery is now O(registered queries × data) rather than O(data): every standing
+query is rebuilt by bootstrap. That is the honest cost of the guarantee, it is the same cost C6's
+registration already pays per query, and it is bounded by the number of queries a client chose to
+register. The alternative's cost was paid by the client, in a way the client could not see.
+
+**MutinyDB seam, noted and not depended on.** `mutinyd` will absorb this surface at its **M6**. Nothing
+here is designed for that: the registry file is `schweepd`'s own, the handle namespace is the data
+directory's, and no field exists to accommodate a future consolidation. When M6 arrives it inherits a
+working contract or replaces it; either way this record is what it will be compared against.
+
+#### D-22 addendum (C9, after the first restart test failed) · recovery is **bootstrap only**, and the state store is discarded on open
+
+The decision above said "rebuilds the circuits on recovery through C7's bootstrap" and left the reader —
+and the implementation — free to assume the C4 checkpoint played its usual part. It does not, and the
+first restart test said so: a handle that answered `SUM(n) = 10` before a restart answered `20` after one,
+with a retraction of `10`, because the redb state store survived on disk *and* bootstrap hydrated the same
+input on top of it. The input was applied twice. Recorded as a correction rather than a quiet fix,
+because the sentence above was incomplete in a way that produced a wrong answer.
+
+**Why the checkpoint cannot be the recovery path here.** `Circuit::snapshot` says it in its own doc:
+it restores into a circuit *of the same shape*, and "a memo is therefore not checkpointable through this
+door, because its shape is the set of queries registered at the time". `schweepd`'s dataflow **is** a
+memo. Two restarts of the same data directory rebuild registrations in handle order, but a deregistration
+can free a node slot that a later registration reuses, so the node layout is a function of the *history*
+of registrations, not of the set — and a snapshot whose node count happens to match a differently-shaped
+circuit would restore silently wrong state. That is not a risk worth taking for a faster start.
+
+**So, precisely:**
+
+1. On open, the **state store is deleted** before it is opened. This is C4's own rule, applied one level
+   up: `testing/crash/src/runtime.rs` clears the spill directory for exactly this reason and says
+   "redb is a spill target here, not a second recovery mechanism". A store that survives a restart is a
+   second, unaudited durability path, and this addendum exists because that path was live.
+2. State comes from **one** source: the retained log, plus the C7 snapshot for any compacted prefix,
+   hydrated per registration as one delta (B1–B3). The dataflow's epoch is set by replaying the log's
+   epochs before any registration exists, so a rebuilt query is caught up to the same epoch as every
+   other one.
+3. **The checkpoint is still taken** — on the interval and on graceful shutdown — and it is **not read by
+   recovery**. It has one job in `schweepd`: to be the published anchor C7's compaction requires (P1,
+   whose anchor is the *oldest* published checkpoint). Written down here rather than left as folklore,
+   because a checkpoint that recovery ignores would otherwise read as a durability guarantee it is not.
+4. **The catch-up is chunked, and that is what keeps the twin comparison strict.** C4's crash harness had
+   to compare a *counter-stripped* fingerprint on its bootstrap cycles, because feeding the whole
+   accumulated history as one delta reaches the right state by a shorter route and counts it differently.
+   `schweepd` does not feed it that way: `Memo::register_from_chunks` catches a registration up **one
+   epoch at a time**, in order, which is the same sequence of passes the live path took. Two consequences,
+   both load-bearing:
+   - the kill -9 gate compares the **full** fingerprint, emission counters included — I-7's own wording
+     ("byte-identical to a process that never crashed") with nothing relaxed;
+   - a late registration is O(largest epoch) resident rather than O(history), which is what discharges
+     C8's forward pointer and is measured under a ceiling by `testing/soak/tests/c9_memo_ceiling.rs`.
+
+### D-23 · The wire contract: endpoints, error taxonomy, and the resume token
+
+*Sprint: C9, decided before any server code. Preserves: I-3, I-4, D-6. Arrow Flight is **deferred**, with
+the reason below. Includes the verdict on MutinyDB's **MD-2 ask 3**.*
+
+**The transport: HTTP/1.1 over TCP, hand-written, no dependencies — and Arrow Flight deferred.**
+§5.8 names "Arrow Flight + HTTP". C9 ships the HTTP half and defers Flight, which is a deviation and
+therefore recorded here rather than in a commit message:
+
+- **What Flight would add:** `tonic`, `prost`, `tokio`, `hyper` — roughly a hundred crates and an async
+  runtime — for a wire format the gates do not need. The differential harness compares *rendered
+  answers*; Arrow's columnar transport would make them faster to move and not different.
+- **What it would cost:** the engine's core is single-threaded and deterministic by construction (D-6,
+  I-2). An async runtime introduces task-scheduling order into the process, and while that order is
+  legitimately at the ingest boundary, every test that touches it becomes a test that can be flaky.
+  The zero-flake policy is not a preference (I-10), and C9's gates are the ones most exposed to it: a
+  kill -9 matrix and a subscriber-crash test cannot afford a scheduler that sometimes reorders.
+- **The endpoints are the contract, not the framing.** Everything below is expressed as paths and
+  bodies; a Flight service exposing the same operations is a transport change, and this record is what
+  it must satisfy. **Deferred to C13's hardening**, where a transport can be added against a gate suite
+  that already exists rather than alongside one being written.
+
+**The bodies are the log's own encoding.** Append batches on the wire are `schweep_log::Record`
+frames — the same length-and-CRC framing the log writes to disk (`docs/DURABILITY.md` §1) — and answers
+are `Canonical::render()`, the byte-exact form the differential harness already compares (S-8). **No new
+serialization format is introduced**, which means there is no new format to be wrong: a batch that
+survives the wire is a batch the log can already write, and an answer that crosses the wire is the
+answer the gate compares.
+
+**The endpoints.**
+
+| Method and path | Does | Body / returns |
+| --- | --- | --- |
+| `POST /ingest?source=&token=&table=` | append one batch (A1–A8) | framed entries → `appended` \| `duplicate` |
+| `POST /seal` | seal the epoch (S1–S4) | → the sealed epoch number |
+| `POST /txn?source=` | **append N batches and seal, atomically** — MD-2 ask 3, see below | framed batches → the sealed epoch |
+| `POST /register` | register a standing query | SQL text → a handle |
+| `POST /deregister?handle=` | free the private suffix | → `ok` |
+| `GET /read?handle=` | read at the latest sealed epoch (I-3) | → `epoch` + rendered answer |
+| `GET /oneshot` | answer once, ephemeral circuit (C7) | SQL text → rendered answer |
+| `GET /subscribe?handle=&from=` | deltas per sealed epoch from a token | → epochs and their rendered deltas, plus the next token |
+| `GET /plan?handle=` | the canonical plan's structural form and hash | → text (this is how the I-6 network gate compares doors) |
+| `GET /counters?handle=` | per-node execution counters | → text (the other half of I-6) |
+| `GET /explain-state` | C8's report | → text |
+| `GET /health` | epoch, registrations, queue depths | → text |
+| `POST /shutdown` | graceful: **checkpoint + drain**, then exit | → `ok` |
+
+**The error taxonomy.** Every failure is one of five kinds, and the kind is the status code, because a
+client's *recovery* differs per kind and a single "error" would leave it guessing:
+
+| Kind | Status | Means | Client should |
+| --- | --- | --- | --- |
+| `Refused` | 400 | the request is outside the dialect or malformed — a statement about the request (S-12) | fix the request; retrying is pointless |
+| `NotFound` | 404 | unknown handle, unknown table, unknown path | stop using that name |
+| `Rejected` | 409 | a *conflict*: a dedup token reused with different content (I-4), a registration that cannot bind | fix the conflict; retrying is pointless |
+| `Overloaded` | 429 | admission refused it: the source's queue is full | **back off and retry** — this is the only retryable kind |
+| `Internal` | 500 | a bug or an I/O failure | retry once, then report |
+
+`Overloaded` being the only retryable kind is the point. A client that retries everything turns a
+malformed request into a hot loop, and a client that retries nothing gives up the moment a queue fills.
+
+**The resume token is the epoch number.** Nothing more: a `u64`. `GET /subscribe?handle=H&from=T`
+returns every sealed epoch **strictly after** `T`, each with its delta, and the token to use next. This
+makes redelivery **idempotent by construction** rather than by bookkeeping:
+
+- The server holds no per-subscriber cursor, so there is nothing to lose in a crash and nothing to get
+  out of step with a client. **The client's own token is the only cursor**, and D-22 makes it a complete
+  one when paired with a handle.
+- Asking twice with the same token returns the same epochs. Exactly-once *per epoch* is therefore a
+  property of the client's arithmetic — advance the token only after the epoch is consumed — and the
+  subscriber-crash gate tests exactly that from the client side.
+- A token ahead of the sealed epoch returns nothing, not an error: a subscriber that is caught up is not
+  a subscriber in trouble.
+- A token *behind* the compacted prefix (C7) returns `Rejected`, because the deltas for those epochs
+  are gone and returning the snapshot instead would deliver an epoch's worth of rows under the wrong
+  epoch number. **A gap must be a refusal, not a silent re-baseline.**
+
+**Delivery is pull, not push, and the guarantee is the same.** §6 says "subscription delivery of
+result-store deltas per sealed epoch"; C9 delivers them when asked rather than pushing them. What push
+would add is latency, not a guarantee — the token semantics above are what make redelivery exactly-once,
+and they are identical either way. Push is a transport concern and travels with Flight to C13.
+
+**MD-2 ask 3 — the transactional multi-append-then-seal: shipped.**
+
+MutinyDB asked, while ingest was being built, for an endpoint that appends N batches and seals in one
+transaction. **It fell out cheaply and it is shipped as `POST /txn`.** The reason it was cheap is
+structural rather than lucky: the log already separates *append* (A1–A8) from *seal* (S1–S4), and a seal
+already commits everything appended before it. So the endpoint is a loop over appends followed by one
+seal, with one addition — **if any append is refused, no seal happens and the appends already made are
+left unsealed**, which is exactly what the log's existing semantics do with a crash between A8 and S1:
+they are pending, and the next seal takes them.
+
+That last sentence is also the honest limit, and it is the reason this is `/txn` and not `/atomic`:
+**partial appends are not rolled back**, because the log is append-only and A5 is durable. What the
+endpoint guarantees is that *the epoch boundary is all-or-nothing* — no epoch is sealed containing some
+of the batches — not that a failed call leaves no trace. A client that needs the stronger property gets
+it the way I-4 already provides it: retry with the same dedup tokens, and the appends that landed are
+dropped as replays.
+
+**The N×append+seal path remains supported and is not deprecated.** `/txn` is a convenience with a
+sharper boundary guarantee; `/ingest` + `/seal` remains the primitive, is what the gates use most, and
+is what a client streaming batches over a long period should use.
+
+**All nondeterminism stays at the ingest boundary (D-6).** The server takes no wall-clock decision: no
+timeouts that change behaviour, no time-based flushes, no expiry. Epochs are sealed when a client says
+so. What *is* nondeterministic is the order in which concurrent clients' requests arrive — which is the
+ingest boundary, where D-6 puts it — and the moment a request crosses into the engine it is on one
+thread in one order. Tests that need an order impose it; nothing sleeps to synchronise.
+
+#### D-23 addendum (C9, on building the gates) · **deltas are not durable; the answer is**
+
+The rule above — "a token behind the compacted prefix returns `Rejected`" — turned out to have a second,
+larger case that the text did not name, and the subscriber gates found it. The retained deltas live in an
+**in-memory ring** (`SUBSCRIPTION_RING`), so a *server restart* empties them. What follows, precisely:
+
+| A subscriber's token, after a server restart | What it gets |
+| --- | --- |
+| at or after the epoch the server recovered to | success, and no epochs — it is caught up |
+| behind that epoch | **`Rejected`** (`TokenTooOld`), naming the oldest epoch the server still has |
+
+So exactly-once-per-epoch-by-idempotent-redelivery holds **within a server's lifetime and across a
+subscriber's crash** — which is what the two gates test — and across a *server's* crash a lagging
+subscriber is refused and must re-baseline by reading the answer. That is the promised behaviour for a gap
+rather than an exception to it: the refusal is the point, because the alternative is delivering an epoch's
+worth of rows under the wrong epoch number.
+
+**Why not make the deltas durable.** It is a per-query delta log, and it would have to be checkpointed,
+compacted and recovered alongside everything else — a second durable stream with its own bounds and its own
+crash matrix. What it would buy is that a subscriber which fell behind before a crash does not have to
+re-read. The answer *is* durable, re-reading it is one request, and D-22 already makes the handle survive.
+Filed rather than built, and named here so nobody mistakes the ring for a durable queue. The two bounds it
+does have — 256 epochs and 8 MiB, both in the ledger with receipts — are what make it not a leak.
+
+#### D-23 addendum (C9) · one bound is not a bound: both queues are limited in **bytes**
+
+`Overloaded` was specified against "the source's queue is full", and the first implementation made that a
+count of batches. Measuring it for the ledger showed the count does not bound anything that matters: at
+the widest batch `testing/evidence/c9-bounds.json` measures — 514,051 bytes — 64 batches is 32.9 MB held
+for one source, and a client sending wider rows sets that figure itself. The same holds on the read side,
+where a delta is as large as the change it describes.
+
+So both queues now carry a **byte bound** beside the count (`DEFAULT_SOURCE_QUEUE_BYTES`,
+`SUBSCRIPTION_RING_BYTES`, 8 MiB each, both in the ledger), and the taxonomy gains one distinction that
+matters more than it looks:
+
+- a source **over** its byte bound is `Overloaded` — retryable, because a seal frees the bytes;
+- a single batch **larger than the whole budget** is `Refused` — *not* retryable, because no amount of
+  waiting makes it fit, and the one promise `Overloaded` makes is that backing off can work. A client that
+  hits this must split the batch, and the message says so.
+
+### D-24 · The crate is `schweep-server`; the binary is `schweepd`
+
+*Sprint: C9. Recorded because `ARCHITECTURE.md` §5's crate map says `schweepd/`, and code that diverges
+from the architecture of record has to say so in this file first (the D-14 precedent, which recorded
+`schweep-plan` for the same reason).*
+
+**The decision.** The crate is `crates/schweep-server`, exporting a library, and it ships two binaries:
+`schweepd` (the server) and `schweep-subscriber` (a subscriber that can be killed, which is what makes the
+subscriber-crash gate a real kill). §5's map names the *daemon*; this names the *crate*, and the difference
+matters for three reasons:
+
+1. **Most of what C9 built is a library**, not a process: the engine composition, the wire types, the
+   admission policy, the persisted registry, and a client. `testing/differential` links it to run the
+   harness over a socket, and `testing/soak` links it to run the ceiling and soak gates. A crate called
+   `schweepd` whose main product is a library it is not named after would be the wrong label.
+2. **Every other crate is `schweep-*`.** A single exception would be the kind of inconsistency that gets
+   "fixed" later by someone who does not know it was deliberate.
+3. **A crate holding two binaries cannot be named for one of them**, and the second binary is not
+   incidental — a gate depends on it.
+
+`ARCHITECTURE.md` §5's line also describes the server as "Arrow Flight + HTTP". It is HTTP alone today;
+**D-23** records Flight's deferral to C13 and why, so that sentence is a plan the document holds and not a
+description of what exists.
+
 ---
 
 ## Open questions

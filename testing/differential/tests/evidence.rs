@@ -17,12 +17,16 @@ use schweep_differential::coverage::{measure, ARTIFACT_SEEDS};
 const ARTIFACT: &str = include_str!("../../evidence/c0-generator-coverage.json");
 const REGISTRY: &str = include_str!("../../evidence/registry.json");
 const STATE_COSTS: &str = include_str!("../../evidence/c8-state-costs.json");
+const C9_BOUNDS: &str = include_str!("../../evidence/c9-bounds.json");
 /// Every artifact the ledger is allowed to cite. A constant citing anything else is citing a file that
 /// nobody committed.
 const ARTIFACTS: &[&str] = &[
     "testing/evidence/c0-generator-coverage.json",
     "testing/evidence/c8-state-costs.json",
     "testing/evidence/c8-cache-sweep.json",
+    "testing/evidence/c9-bounds.json",
+    "testing/evidence/c9-memo-ceiling.json",
+    "testing/evidence/c9-soak.json",
 ];
 
 #[test]
@@ -131,6 +135,60 @@ fn every_engine_constant_cites_an_artifact_and_matches_the_code() {
     assert_eq!(
         registry.value_of("WARM_UP_SAMPLES"),
         Some(schweep_soak::Curve::WARM_UP_SAMPLES.to_string())
+    );
+    assert_eq!(
+        registry.value_of("DEFAULT_SOURCE_QUEUE_BOUND"),
+        Some(schweep_server::DEFAULT_SOURCE_QUEUE_BOUND.to_string())
+    );
+    assert_eq!(
+        registry.value_of("DEFAULT_SOURCE_QUEUE_BYTES"),
+        Some(schweep_server::DEFAULT_SOURCE_QUEUE_BYTES.to_string())
+    );
+    assert_eq!(
+        registry.value_of("SUBSCRIPTION_RING"),
+        Some(schweep_server::SUBSCRIPTION_RING.to_string())
+    );
+    assert_eq!(
+        registry.value_of("SUBSCRIPTION_RING_BYTES"),
+        Some(schweep_server::SUBSCRIPTION_RING_BYTES.to_string())
+    );
+}
+
+/// **C9's measurements are deterministic, so they are recomputed** (I-10).
+///
+/// A framed record's length and a rendered delta's length are pure functions of their inputs: no clock, no
+/// allocator, no machine. So `c9-bounds.json` is held to the same standard as the C0 coverage artifact
+/// rather than to the weaker standard `c8-cache-sweep.json` has to accept. If the wire encoding changes, or
+/// the delta rendering changes, this fails — and the ledger entries that quote these numbers to justify
+/// four constants have to be re-read, because the reason for them will have moved.
+#[test]
+fn the_c9_bounds_artifact_still_describes_the_wire() {
+    let measured = schweep_server::costs::measure().to_json();
+    assert_eq!(
+        measured, C9_BOUNDS,
+        "\ntesting/evidence/c9-bounds.json no longer describes the wire.\n\
+         If the encoding or the bounds changed deliberately, regenerate it with:\n  \
+         cargo run --release -p schweep-server --bin c9-costs > testing/evidence/c9-bounds.json\n\
+         and re-read the justifications for DEFAULT_SOURCE_QUEUE_BOUND, DEFAULT_SOURCE_QUEUE_BYTES, \
+         SUBSCRIPTION_RING and SUBSCRIPTION_RING_BYTES.\n"
+    );
+
+    // And the ledger's own arithmetic: the two bounds must still meet where the entries say they do.
+    let measured = schweep_server::costs::measure();
+    let widest = measured.widest_batch().expect("a batch was measured");
+    assert!(
+        widest.frame_bytes * schweep_server::DEFAULT_SOURCE_QUEUE_BOUND
+            > schweep_server::DEFAULT_SOURCE_QUEUE_BYTES,
+        "the count bound alone would admit {} bytes, which is under the byte bound — the ledger's \
+         justification for having both no longer holds",
+        widest.frame_bytes * schweep_server::DEFAULT_SOURCE_QUEUE_BOUND
+    );
+    let delta = measured.widest_delta().expect("a delta was measured");
+    assert!(
+        delta.rendered_bytes * schweep_server::SUBSCRIPTION_RING
+            <= schweep_server::SUBSCRIPTION_RING_BYTES,
+        "the ring's byte bound must sit above what its count bound implies at the widest measured \
+         delta, or a narrow query silently loses history it was promised"
     );
 }
 
