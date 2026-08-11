@@ -590,6 +590,7 @@ dependencies = [
  "schweep-ops",
  "schweep-oracle",
  "schweep-plan",
+ "schweep-server",
  "schweep-soak",
  "schweep-sql",
  "schweep-state",
@@ -648,13 +649,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "schweep-server"
+version = "0.0.0"
+dependencies = [
+ "schweep-batch",
+ "schweep-circuit",
+ "schweep-differential",
+ "schweep-log",
+ "schweep-memo",
+ "schweep-oracle",
+ "schweep-plan",
+ "schweep-sql",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
 name = "schweep-soak"
 version = "0.0.0"
 dependencies = [
  "schweep-circuit",
  "schweep-differential",
+ "schweep-log",
  "schweep-memo",
+ "schweep-oracle",
  "schweep-plan",
+ "schweep-server",
  "schweep-sql",
  "schweep-state",
  "schweep-zset",

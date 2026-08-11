@@ -11,6 +11,7 @@ members = [
     "crates/schweep-sql",
     "crates/schweep-memo",
     "crates/schweep-batch",
+    "crates/schweep-server",
     "testing/differential",
     "testing/crash",
     "testing/soak",
@@ -31,12 +32,14 @@ schweep-state = { path = "crates/schweep-state" }
 schweep-log = { path = "crates/schweep-log" }
 schweep-differential = { path = "testing/differential" }
 schweep-soak = { path = "testing/soak" }
+schweep-crash = { path = "testing/crash" }
 schweep-oracle = { path = "crates/schweep-oracle" }
 schweep-ops = { path = "crates/schweep-ops" }
 schweep-circuit = { path = "crates/schweep-circuit" }
 schweep-sql = { path = "crates/schweep-sql" }
 schweep-memo = { path = "crates/schweep-memo" }
 schweep-batch = { path = "crates/schweep-batch" }
+schweep-server = { path = "crates/schweep-server" }
 
 arrow-array = { version = "59", default-features = false }
 arrow-buffer = { version = "59", default-features = false }

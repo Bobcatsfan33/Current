@@ -18,6 +18,7 @@ schweep-memo.workspace = true
 schweep-batch.workspace = true
 schweep-log.workspace = true
 schweep-state.workspace = true
+schweep-server.workspace = true
 schweep-oracle.workspace = true
 rand_core.workspace = true
 rand_chacha.workspace = true
