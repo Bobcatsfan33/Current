@@ -160,18 +160,24 @@ jobs:
       - name: Run it under a fixed 128 MiB ceiling
         run: |
           set -euo pipefail
-          binary=$(cargo test --release -p current-soak --test c8_ceiling --locked --no-run \
-            --message-format=json 2>/dev/null \
-            | python3 -c 'import json,sys
-for line in sys.stdin:
-    record = json.loads(line)
-    if record.get("profile", {}).get("test") and record.get("executable"):
-        print(record["executable"])' | tail -1)
+          # The test binary, found by glob rather than by parsing cargo's JSON: the `.d` files share the
+          # prefix, so they are filtered out, and there is exactly one binary because `--test` names one.
+          binary=""
+          for candidate in target/release/deps/c8_ceiling-*; do
+            case "$candidate" in
+              *.d) continue ;;
+            esac
+            if [ -x "$candidate" ]; then binary="$candidate"; fi
+          done
+          if [ -z "$binary" ]; then
+            echo "::error::no c8_ceiling test binary was built"
+            exit 1
+          fi
           echo "running $binary under MemoryMax=128M"
           sudo systemd-run --scope --quiet \
             -p MemoryMax=128M -p MemorySwapMax=0 \
-            -E CURRENT_CEILING_REQUIRED=1 \
-            -E TMPDIR="$RUNNER_TEMP" \
+            --setenv=CURRENT_CEILING_REQUIRED=1 \
+            --setenv=TMPDIR="$RUNNER_TEMP" \
             "$binary" --nocapture --test-threads=1
 
   # A single required check, so branch protection has one name to point at rather than four that
