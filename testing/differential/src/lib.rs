@@ -1,4 +1,4 @@
-//! # current-differential — the oracle harness
+//! # schweep-differential — the oracle harness
 //!
 //! **The differential harness is the product's credibility** (`ARCHITECTURE.md` §7). Every
 //! correctness claim Current will ever make routes through this crate: a seeded scenario is
@@ -14,7 +14,7 @@
 //! implementation the harness must catch.
 //!
 //! There is no incremental engine yet, so **nothing here proves anything about incremental
-//! evaluation**. From C1, one side becomes `current-circuit` and the same code starts earning
+//! evaluation**. From C1, one side becomes `schweep-circuit` and the same code starts earning
 //! its keep.
 //!
 //! ## Layout
@@ -36,7 +36,7 @@
 //! Every failure prints its seed. `Scenario::generate(seed)` re-creates the run exactly:
 //!
 //! ```
-//! use current_differential::{compare, OracleEngine, Scenario};
+//! use schweep_differential::{compare, OracleEngine, Scenario};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let scenario = Scenario::generate(42)?;

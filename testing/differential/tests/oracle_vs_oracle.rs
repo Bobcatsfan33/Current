@@ -12,8 +12,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::scenario::Operation;
-use current_differential::{sweep, Family, OracleEngine, Scenario};
+use schweep_differential::scenario::Operation;
+use schweep_differential::{sweep, Family, OracleEngine, Scenario};
 
 /// The gate: 1,000 randomized scenarios, oracle against oracle, compared at every sealed epoch.
 #[test]
@@ -179,7 +179,7 @@ fn a_healthy_share_of_scenarios_produce_a_non_empty_answer() {
     let total = 400;
     for seed in 0..total {
         let scenario = Scenario::generate(seed).unwrap();
-        let report = current_differential::compare::<OracleEngine, OracleEngine>(&scenario)
+        let report = schweep_differential::compare::<OracleEngine, OracleEngine>(&scenario)
             .unwrap_or_else(|d| panic!("{d}"));
         if report
             .answers
@@ -208,7 +208,7 @@ fn an_empty_epoch_never_changes_the_answer() {
         if !scenario.has_empty_epoch() {
             continue;
         }
-        let report = match current_differential::compare::<OracleEngine, OracleEngine>(&scenario) {
+        let report = match schweep_differential::compare::<OracleEngine, OracleEngine>(&scenario) {
             Ok(report) => report,
             Err(divergence) => panic!("{divergence}"),
         };

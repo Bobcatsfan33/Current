@@ -3,13 +3,13 @@
 //! The harness knows nothing about how an answer is produced. It hands an implementation a
 //! sequence of sealed epochs and asks for the answer after each one. In C0 the only
 //! implementation was the oracle, on both sides of the comparison, which proved the harness rather
-//! than the engine. From C1 `current-circuit` implements the same trait and the comparison starts
+//! than the engine. From C1 `schweep-circuit` implements the same trait and the comparison starts
 //! meaning something (I-1).
 //!
 //! ## What this trait is allowed to know
 //!
-//! Only the neutral layer: [`current_plan::Query`] for the question, [`current_zset::EpochDeltas`]
-//! for the changes, and [`current_zset::Canonical`] for the answer. It names **no**
+//! Only the neutral layer: [`schweep_plan::Query`] for the question, [`schweep_zset::EpochDeltas`]
+//! for the changes, and [`schweep_zset::Canonical`] for the answer. It names **no**
 //! implementation's types — not the oracle's, not the circuit's — which is what lets one be
 //! swapped for the other without the harness noticing (D-14).
 //!
@@ -17,8 +17,8 @@
 //! it imported nothing of the oracle's. The claim is now true because the types moved, not because
 //! the comment was softened.
 
-use current_plan::Query;
-use current_zset::{Canonical, EpochDeltas, Schema};
+use schweep_plan::Query;
+use schweep_zset::{Canonical, EpochDeltas, Schema};
 
 /// Something that can be fed sealed epochs and asked for an answer.
 ///

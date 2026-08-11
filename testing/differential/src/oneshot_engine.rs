@@ -11,10 +11,10 @@
 
 use std::collections::BTreeMap;
 
-use current_batch::oneshot;
-use current_plan::bind::Catalog;
-use current_plan::plan::Query;
-use current_zset::{Canonical, EpochDeltas, Schema, ZSetBatch};
+use schweep_batch::oneshot;
+use schweep_plan::bind::Catalog;
+use schweep_plan::plan::Query;
+use schweep_zset::{Canonical, EpochDeltas, Schema, ZSetBatch};
 
 use crate::engine::EngineUnderTest;
 
@@ -50,7 +50,7 @@ impl EngineUnderTest for OneShotEngine {
         let catalog: Catalog = tables.iter().cloned().collect();
         // Bind once here so a query outside the dialect is refused at build time, exactly as the
         // standing path refuses it — otherwise a one-shot could answer something the engine would not.
-        current_plan::bind(query, &catalog).map_err(|e| e.to_string())?;
+        schweep_plan::bind(query, &catalog).map_err(|e| e.to_string())?;
         Ok(OneShotEngine {
             catalog,
             query: query.clone(),

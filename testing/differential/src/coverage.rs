@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use current_oracle::Oracle;
-use current_plan::Query;
+use schweep_oracle::Oracle;
+use schweep_plan::Query;
 
 use crate::harness::compare;
 use crate::oracle_engine::OracleEngine;
@@ -213,7 +213,7 @@ impl Coverage {
         out.push_str("{\n");
         out.push_str(
             "  \"$comment\": \"Receipt for the scenario generator's tuned constants (I-10). \
-             Regenerate with: cargo run -p current-differential --bin generator-coverage \
+             Regenerate with: cargo run -p schweep-differential --bin generator-coverage \
              > testing/evidence/c0-generator-coverage.json. A deterministic function of the \
              seed range: no timing, no threads, machine-independent.\",\n",
         );

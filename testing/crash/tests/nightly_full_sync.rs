@@ -22,11 +22,11 @@
 
 use std::path::PathBuf;
 
-use current_crash::{run_clean, run_with_fault, Config, FaultChoice};
-use current_differential::{CircuitEngine, Scenario};
+use schweep_crash::{run_clean, run_with_fault, Config, FaultChoice};
+use schweep_differential::{CircuitEngine, Scenario};
 
 fn dir_for(seed: u64, tag: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("current-c4-nightly-{tag}-{seed}"));
+    let base = std::env::temp_dir().join(format!("schweep-c4-nightly-{tag}-{seed}"));
     let _ = std::fs::remove_dir_all(&base);
     base
 }
@@ -83,11 +83,11 @@ fn crash_and_recover_with_real_fsync() {
                 recovered
                     .fingerprints
                     .last()
-                    .map(|f| current_crash::without_emission_counts(f)),
+                    .map(|f| schweep_crash::without_emission_counts(f)),
                 clean
                     .fingerprints
                     .last()
-                    .map(|f| current_crash::without_emission_counts(f)),
+                    .map(|f| schweep_crash::without_emission_counts(f)),
             )
         } else {
             (
@@ -125,7 +125,7 @@ fn crash_and_recover_with_real_fsync() {
     // it is asserted rather than assumed.
     assert_eq!(
         Config::durable().sync,
-        current_log::SyncPolicy::Full,
+        schweep_log::SyncPolicy::Full,
         "the nightly job must run with every write synced, or it is the ordinary gate again"
     );
 }

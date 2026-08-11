@@ -1,5 +1,5 @@
 [package]
-name = "current-soak"
+name = "schweep-soak"
 description = "The soak harness: RSS sampled across a run, at a fixed memory ceiling."
 version.workspace = true
 edition.workspace = true
@@ -9,13 +9,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-current-zset.workspace = true
-current-plan.workspace = true
-current-state.workspace = true
-current-circuit.workspace = true
-current-sql.workspace = true
-current-memo.workspace = true
-current-differential.workspace = true
+schweep-zset.workspace = true
+schweep-plan.workspace = true
+schweep-state.workspace = true
+schweep-circuit.workspace = true
+schweep-sql.workspace = true
+schweep-memo.workspace = true
+schweep-differential.workspace = true
 
 [lints]
 workspace = true

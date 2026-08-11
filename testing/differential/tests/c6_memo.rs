@@ -26,11 +26,11 @@
     clippy::indexing_slicing
 )]
 
-use current_differential::{sweep_matching, MemoEngine, OracleEngine};
-use current_memo::{Memo, Sharing};
-use current_oracle::Oracle;
-use current_plan::bind::Catalog;
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_differential::{sweep_matching, MemoEngine, OracleEngine};
+use schweep_memo::{Memo, Sharing};
+use schweep_oracle::Oracle;
+use schweep_plan::bind::Catalog;
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 /// The battery: overlapping standing queries over one dataflow.
 ///
@@ -146,7 +146,7 @@ fn history() -> Vec<EpochDeltas> {
 
 /// Register the whole battery into one memo and step it through a history, collecting every answer
 /// at every epoch — plus the operator-step count the I-8 counter proof compares.
-fn run_battery(sharing: Sharing) -> (Vec<String>, usize, current_memo::Accounting) {
+fn run_battery(sharing: Sharing) -> (Vec<String>, usize, schweep_memo::Accounting) {
     let mut memo = Memo::with_sharing(catalog(), sharing).unwrap();
     let handles: Vec<_> = BATTERY
         .iter()
@@ -242,7 +242,7 @@ fn every_query_in_the_battery_agrees_with_the_oracle_at_every_epoch() {
         .collect();
     let queries: Vec<_> = BATTERY
         .iter()
-        .map(|sql| current_sql::bind_sql(sql, &catalog()).expect(sql).query)
+        .map(|sql| schweep_sql::bind_sql(sql, &catalog()).expect(sql).query)
         .collect();
 
     let mut compared = 0usize;
@@ -319,7 +319,7 @@ fn a_query_attaching_mid_history_answers_as_though_it_had_always_been_there() {
     );
 
     for (sql, handle) in &handles {
-        let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+        let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
         let from_memo = memo.read(*handle).unwrap().1.render();
         let from_oracle = oracle
             .canonical_answer_at(&query, oracle.sealed_epoch())
@@ -346,7 +346,7 @@ fn a_query_attaching_mid_history_answers_as_though_it_had_always_been_there() {
     oracle.seal_epoch(more).unwrap();
 
     for (sql, handle) in &handles {
-        let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+        let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
         assert_eq!(
             memo.read(*handle).unwrap().1.render(),
             oracle
@@ -356,7 +356,7 @@ fn a_query_attaching_mid_history_answers_as_though_it_had_always_been_there() {
             "{sql} after a further epoch"
         );
     }
-    let early_query = current_sql::bind_sql(BATTERY[0], &catalog()).unwrap().query;
+    let early_query = schweep_sql::bind_sql(BATTERY[0], &catalog()).unwrap().query;
     assert_eq!(
         memo.read(early).unwrap().1.render(),
         oracle
@@ -381,7 +381,7 @@ fn a_query_attaching_to_an_erroring_core_inherits_the_error_and_recovers_with_it
     // `t.n / t.k` raises when k is 0 (S-21).
     let core = "SELECT t.n AS n FROM t WHERE (t.n / t.k) > 0";
     let resident = memo.register_sql(core).unwrap();
-    let core_query = current_sql::bind_sql(core, &catalog()).unwrap().query;
+    let core_query = schweep_sql::bind_sql(core, &catalog()).unwrap().query;
 
     let mut first = EpochDeltas::new();
     first.extend(
@@ -409,7 +409,7 @@ fn a_query_attaching_to_an_erroring_core_inherits_the_error_and_recovers_with_it
     // Attach a suffix to the erroring core, mid-history.
     let suffix = "SELECT DISTINCT t.n AS n FROM t WHERE (t.n / t.k) > 0";
     let late = memo.register_sql(suffix).unwrap();
-    let suffix_query = current_sql::bind_sql(suffix, &catalog()).unwrap().query;
+    let suffix_query = schweep_sql::bind_sql(suffix, &catalog()).unwrap().query;
     memo.audit().unwrap();
 
     let late_error = memo.read(late).unwrap_err().to_string();
@@ -547,7 +547,7 @@ fn a_thousand_cycles_over_a_live_dataflow_leak_nothing() {
         oracle.seal_epoch(deltas).unwrap();
     }
     for (sql, handle) in BATTERY.iter().take(3).zip(&resident) {
-        let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+        let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
         assert_eq!(
             memo.read(*handle).unwrap().1.render(),
             oracle

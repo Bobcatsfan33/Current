@@ -1,7 +1,7 @@
 //! Measure how redb's page cache steers resident memory, and emit the ledger's artifact (I-10).
 //!
 //! ```text
-//!   cargo run --release -p current-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json
+//!   cargo run --release -p schweep-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json
 //! ```
 //!
 //! This is `CACHE_BYTES`'s receipt, and `WARM_UP_SAMPLES`'s, and the ceiling gate's thresholds'. Unlike
@@ -20,10 +20,10 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used, clippy::expect_used)]
 
-use current_plan::bind::Catalog;
-use current_soak::Curve;
-use current_state::RedbFactory;
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_plan::bind::Catalog;
+use schweep_soak::Curve;
+use schweep_state::RedbFactory;
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 const ROWS_PER_EPOCH: i64 = 750;
 const PADDING: usize = 480;
@@ -65,15 +65,15 @@ fn directory_bytes(dir: &std::path::Path) -> u64 {
 
 fn main() {
     let target: u64 = 1024 * 1024 * 1024;
-    let root = std::env::temp_dir().join("current-cache-sweep");
+    let root = std::env::temp_dir().join("schweep-cache-sweep");
     let _ = std::fs::remove_dir_all(&root);
     let spill = root.join("state");
 
     let catalog = catalog();
     let sql = format!("SELECT a.id AS id FROM a JOIN b ON a.id = b.id WHERE a.id < {ANSWER_KEYS}");
-    let plan = current_sql::compile(&sql, &catalog).unwrap();
+    let plan = schweep_sql::compile(&sql, &catalog).unwrap();
     let mut factory = RedbFactory::new(&spill);
-    let mut circuit = current_sql::instantiate_with(&plan, &mut factory).unwrap();
+    let mut circuit = schweep_sql::instantiate_with(&plan, &mut factory).unwrap();
 
     let mut curve = Curve::default();
     let mut rows = 0i64;
@@ -110,7 +110,7 @@ fn main() {
     println!("{{");
     println!("  \"$comment\": [");
     println!("    \"C8 · how redb's page cache steers resident memory (I-10).\",");
-    println!("    \"Regenerate: cargo run --release -p current-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json\",");
+    println!("    \"Regenerate: cargo run --release -p schweep-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json\",");
     println!(
         "    \"MACHINE-DEPENDENT: resident memory is an allocator and kernel figure, so no test\","
     );
@@ -131,7 +131,7 @@ fn main() {
     println!("  \"at_the_compiled_setting\": {{");
     println!(
         "    \"cache_bytes\": {},",
-        current_state::redb_backend::CACHE_BYTES
+        schweep_state::redb_backend::CACHE_BYTES
     );
     println!("    \"target_state_bytes\": {target},");
     println!("    \"state_bytes_reached\": {state},");

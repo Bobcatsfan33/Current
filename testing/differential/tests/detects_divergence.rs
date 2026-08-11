@@ -10,7 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::{compare, DivergenceKind, OracleEngine, SaboteurEngine, Scenario};
+use schweep_differential::{compare, DivergenceKind, OracleEngine, SaboteurEngine, Scenario};
 
 /// The saboteur — the oracle with one entry dropped from every answer — must be caught.
 #[test]

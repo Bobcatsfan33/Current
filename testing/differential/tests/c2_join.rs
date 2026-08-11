@@ -21,12 +21,12 @@
     clippy::indexing_slicing
 )]
 
-use current_differential::{
+use schweep_differential::{
     compare, sweep_matching, CircuitEngine, EngineUnderTest, OracleEngine, Scenario,
 };
-use current_plan::plan::{BinOp, Named, Query, Source};
-use current_plan::Expr;
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_plan::plan::{BinOp, Named, Query, Source};
+use schweep_plan::Expr;
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 /// Seeds swept to reach a large rung-2 population. One family in four is a plain join.
 const SEEDS: u64 = 4400;
@@ -69,7 +69,7 @@ fn handwritten(name_seed: u64, epochs: Vec<EpochDeltas>) -> Scenario {
         tables: two_int_tables(),
         query: join_query(),
         epochs,
-        family: current_differential::Family::Join,
+        family: schweep_differential::Family::Join,
     }
 }
 
@@ -79,7 +79,7 @@ fn handwritten(name_seed: u64, epochs: Vec<EpochDeltas>) -> Scenario {
 /// be asserting the absence of errors rather than the property it is about. Rendering both means the
 /// comparison covers error text too, which is what I-1 requires.
 fn rendered(engine: &CircuitEngine) -> String {
-    use current_differential::EngineUnderTest;
+    use schweep_differential::EngineUnderTest;
     match engine.answer() {
         Ok(answer) => answer.render(),
         Err(message) => format!("ERROR: {message}"),
@@ -313,7 +313,7 @@ fn a_table_joined_to_itself_agrees_with_the_oracle() {
         tables,
         query,
         epochs: vec![first],
-        family: current_differential::Family::Join,
+        family: schweep_differential::Family::Join,
     };
 
     let mut engine = CircuitEngine::build(&scenario.tables, &scenario.query).unwrap();
@@ -350,7 +350,7 @@ fn a_filter_and_projection_over_a_join() {
         tables: two_int_tables(),
         query,
         epochs: vec![first],
-        family: current_differential::Family::Join,
+        family: schweep_differential::Family::Join,
     };
 
     let mut engine = CircuitEngine::build(&scenario.tables, &scenario.query).unwrap();
@@ -596,7 +596,7 @@ fn field(line: &str, key: &str) -> usize {
 /// The harness can still fail against the join, not only against the linear operators.
 #[test]
 fn the_gate_would_catch_a_wrong_join() {
-    use current_differential::SaboteurEngine;
+    use schweep_differential::SaboteurEngine;
 
     let mut examined = 0;
     for seed in 0..SEEDS {

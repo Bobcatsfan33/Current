@@ -9,11 +9,11 @@
 //! Sharing itself is checked by `testing/differential/tests/c6_memo.rs`, which registers overlapping
 //! queries and compares the same battery with sharing on and off (I-8).
 
-use current_memo::{Admission, Handle, Memo, Sharing};
-use current_plan::bind::Catalog;
-use current_plan::plan::Query;
-use current_sql::incrementalize_typed;
-use current_zset::{Canonical, EpochDeltas, Schema};
+use schweep_memo::{Admission, Handle, Memo, Sharing};
+use schweep_plan::bind::Catalog;
+use schweep_plan::plan::Query;
+use schweep_sql::incrementalize_typed;
+use schweep_zset::{Canonical, EpochDeltas, Schema};
 
 use crate::engine::EngineUnderTest;
 

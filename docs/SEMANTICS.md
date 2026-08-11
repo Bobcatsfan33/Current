@@ -1,4 +1,4 @@
-# SEMANTICS — what a query means in Current
+# SEMANTICS — what a query means in Schweep
 
 **Scope: dialect rungs 1–3** (ARCHITECTURE.md §5.6), **plus `DISTINCT`**:
 
@@ -13,7 +13,7 @@ subqueries) are **not** defined here and are not implemented. Anything not defin
 name, never silently accepted.
 
 **This document is written before the code.** Per §10, semantics change here first, in
-`current-oracle` second, in the engine third. When the differential harness reports a
+`schweep-oracle` second, in the engine third. When the differential harness reports a
 disagreement, this document decides who is wrong; if this document is wrong, it is corrected here
 before either implementation moves.
 
@@ -102,7 +102,7 @@ and it is why the oracle is trustworthy.
 
 ### S-7 · Total order on values
 
-Every ordering in Current is total (D-7). The order on values is:
+Every ordering in Schweep is total (D-7). The order on values is:
 
 1. **`Null` sorts before every non-null value.** (Chosen, not inherited: SQL leaves it
    implementation-defined. Nulls-first is a single fixed rule with no `NULLS FIRST/LAST` modifier
@@ -162,7 +162,7 @@ keys and aggregates, referenced unqualified — grouping erases the input schema
 
 ### S-11 · Output names are explicit
 
-Every projection element, group key, and aggregate declares its output name explicitly. Current
+Every projection element, group key, and aggregate declares its output name explicitly. Schweep
 does not derive names from expressions.
 
 Duplicate output names in one schema are refused (`DuplicateOutputName`).
@@ -569,7 +569,7 @@ would otherwise return, not the rows it read.
 Three consequences worth stating, because each is a place a naive implementation goes wrong:
 
 - **Weights collapse, they do not saturate.** A row at weight 7 becomes weight 1, and a row at
-  weight 1 stays weight 1. `DISTINCT` is the one operator in Current whose output weight is not a
+  weight 1 stays weight 1. `DISTINCT` is the one operator in Schweep whose output weight is not a
   sum or a product of its input weights.
 - **It is stateful, and it is the reason.** Incrementally, the output changes only when a row
   crosses between absent and present. That is a question about the row's *integral*, not about the

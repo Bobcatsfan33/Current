@@ -9,11 +9,11 @@
 //! A query the renderer declines has no SQL form, and this engine says so rather than substituting
 //! something close to it: [`SqlEngine::build`] returns the decline as an error, and the gate counts it.
 
-use current_circuit::Circuit;
-use current_plan::bind::Catalog;
-use current_plan::plan::Query;
-use current_sql::{compile, instantiate, CircuitPlan};
-use current_zset::{Canonical, EpochDeltas, Schema};
+use schweep_circuit::Circuit;
+use schweep_plan::bind::Catalog;
+use schweep_plan::plan::Query;
+use schweep_sql::{compile, instantiate, CircuitPlan};
+use schweep_zset::{Canonical, EpochDeltas, Schema};
 
 use crate::engine::EngineUnderTest;
 use crate::sql_render::{sql_form, NoSqlForm};

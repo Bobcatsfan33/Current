@@ -15,12 +15,12 @@
     clippy::indexing_slicing
 )]
 
-use current_differential::{
+use schweep_differential::{
     compare, sweep_matching, CircuitEngine, EngineUnderTest, Family, OracleEngine, Scenario,
 };
-use current_plan::plan::{BinOp, GroupBy, Named, Query, Source};
-use current_plan::{AggFunc, Expr};
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_plan::plan::{BinOp, GroupBy, Named, Query, Source};
+use schweep_plan::{AggFunc, Expr};
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 const SEEDS: u64 = 4400;
 
@@ -815,7 +815,7 @@ fn field(line: &str, key: &str) -> usize {
 /// The harness can still fail against the aggregates.
 #[test]
 fn the_gate_would_catch_a_wrong_aggregate() {
-    use current_differential::SaboteurEngine;
+    use schweep_differential::SaboteurEngine;
 
     let mut examined = 0;
     for seed in 0..SEEDS {

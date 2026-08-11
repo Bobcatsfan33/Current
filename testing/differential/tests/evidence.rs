@@ -12,7 +12,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::coverage::{measure, ARTIFACT_SEEDS};
+use schweep_differential::coverage::{measure, ARTIFACT_SEEDS};
 
 const ARTIFACT: &str = include_str!("../../evidence/c0-generator-coverage.json");
 const REGISTRY: &str = include_str!("../../evidence/registry.json");
@@ -35,7 +35,7 @@ fn the_committed_coverage_artifact_still_matches_the_generator() {
         measured, ARTIFACT,
         "\ntesting/evidence/c0-generator-coverage.json no longer describes the generator.\n\
          If the generator changed deliberately, regenerate it with:\n  \
-         cargo run -p current-differential --bin generator-coverage \
+         cargo run -p schweep-differential --bin generator-coverage \
          > testing/evidence/c0-generator-coverage.json\n\
          and re-read the justifications in registry.json — the numbers that motivated those \
          constants have moved.\n"
@@ -117,20 +117,20 @@ fn every_engine_constant_cites_an_artifact_and_matches_the_code() {
     let cache = registry.value_of("CACHE_BYTES");
     assert_eq!(
         cache,
-        Some(current_state::redb_backend::CACHE_BYTES.to_string()),
+        Some(schweep_state::redb_backend::CACHE_BYTES.to_string()),
         "the ledger's CACHE_BYTES does not match the constant in the code"
     );
     assert_eq!(
         registry.value_of("BYTES_PER_ENTRY_LOW"),
-        Some(current_memo::costs::BYTES_PER_ENTRY_LOW.to_string())
+        Some(schweep_memo::costs::BYTES_PER_ENTRY_LOW.to_string())
     );
     assert_eq!(
         registry.value_of("BYTES_PER_BACKEND"),
-        Some(current_memo::costs::BYTES_PER_BACKEND.to_string())
+        Some(schweep_memo::costs::BYTES_PER_BACKEND.to_string())
     );
     assert_eq!(
         registry.value_of("WARM_UP_SAMPLES"),
-        Some(current_soak::Curve::WARM_UP_SAMPLES.to_string())
+        Some(schweep_soak::Curve::WARM_UP_SAMPLES.to_string())
     );
 }
 
@@ -148,10 +148,10 @@ fn the_state_cost_artifact_still_describes_the_backend() {
     let recorded: serde_free::Costs = serde_free::parse_costs(STATE_COSTS);
 
     // An empty backend, measured now.
-    let dir = std::env::temp_dir().join(format!("current-evidence-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("schweep-evidence-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let backend = current_state::RedbBackend::open(dir.join("state.redb")).unwrap();
+    let backend = schweep_state::RedbBackend::open(dir.join("state.redb")).unwrap();
     let empty = backend.bytes_on_disk().unwrap();
     drop(backend);
     let _ = std::fs::remove_dir_all(&dir);
@@ -159,23 +159,23 @@ fn the_state_cost_artifact_still_describes_the_backend() {
     assert_eq!(
         empty, recorded.bytes_when_empty,
         "an empty redb backend now occupies {empty} bytes; the artifact records {}. Regenerate it with:\n  \
-         cargo run --release -p current-memo --bin state-costs > testing/evidence/c8-state-costs.json\n\
+         cargo run --release -p schweep-memo --bin state-costs > testing/evidence/c8-state-costs.json\n\
          and re-read the justifications for BYTES_PER_BACKEND and BYTES_PER_ENTRY_LOW — the numbers that \
          motivated them have moved.",
         recorded.bytes_when_empty
     );
     assert_eq!(
         empty,
-        current_memo::costs::BYTES_PER_BACKEND,
+        schweep_memo::costs::BYTES_PER_BACKEND,
         "BYTES_PER_BACKEND must be the measured empty-file size"
     );
 
     // And the floor the ledger publishes is still below the narrowest measured per-entry cost.
     assert!(
-        current_memo::costs::BYTES_PER_ENTRY_LOW < recorded.narrowest_per_entry_at_scale,
+        schweep_memo::costs::BYTES_PER_ENTRY_LOW < recorded.narrowest_per_entry_at_scale,
         "BYTES_PER_ENTRY_LOW is {} but the narrowest measured per-entry cost is {}; the floor must be a \
          bound, not a fit",
-        current_memo::costs::BYTES_PER_ENTRY_LOW,
+        schweep_memo::costs::BYTES_PER_ENTRY_LOW,
         recorded.narrowest_per_entry_at_scale
     );
 }

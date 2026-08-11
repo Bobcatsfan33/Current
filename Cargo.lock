@@ -192,167 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "current-batch"
-version = "0.0.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "current-circuit",
- "current-log",
- "current-memo",
- "current-ops",
- "current-oracle",
- "current-plan",
- "current-sql",
- "current-state",
- "current-zset",
- "parquet",
- "thiserror",
-]
-
-[[package]]
-name = "current-circuit"
-version = "0.0.0"
-dependencies = [
- "current-log",
- "current-ops",
- "current-plan",
- "current-state",
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-crash"
-version = "0.0.0"
-dependencies = [
- "current-batch",
- "current-circuit",
- "current-differential",
- "current-log",
- "current-ops",
- "current-plan",
- "current-state",
- "current-zset",
-]
-
-[[package]]
-name = "current-differential"
-version = "0.0.0"
-dependencies = [
- "current-batch",
- "current-circuit",
- "current-log",
- "current-memo",
- "current-ops",
- "current-oracle",
- "current-plan",
- "current-soak",
- "current-sql",
- "current-state",
- "current-zset",
- "rand_chacha 0.10.0",
- "rand_core 0.10.1",
- "thiserror",
-]
-
-[[package]]
-name = "current-log"
-version = "0.0.0"
-dependencies = [
- "current-state",
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-memo"
-version = "0.0.0"
-dependencies = [
- "current-circuit",
- "current-ops",
- "current-oracle",
- "current-plan",
- "current-sql",
- "current-state",
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-ops"
-version = "0.0.0"
-dependencies = [
- "current-plan",
- "current-state",
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-oracle"
-version = "0.0.0"
-dependencies = [
- "current-plan",
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-plan"
-version = "0.0.0"
-dependencies = [
- "current-zset",
- "thiserror",
-]
-
-[[package]]
-name = "current-soak"
-version = "0.0.0"
-dependencies = [
- "current-circuit",
- "current-differential",
- "current-memo",
- "current-plan",
- "current-sql",
- "current-state",
- "current-zset",
-]
-
-[[package]]
-name = "current-sql"
-version = "0.0.0"
-dependencies = [
- "current-circuit",
- "current-ops",
- "current-plan",
- "current-state",
- "current-zset",
- "sqlparser",
- "thiserror",
-]
-
-[[package]]
-name = "current-state"
-version = "0.0.0"
-dependencies = [
- "current-zset",
- "redb",
- "thiserror",
-]
-
-[[package]]
-name = "current-zset"
-version = "0.0.0"
-dependencies = [
- "arrow-array",
- "arrow-buffer",
- "arrow-schema",
- "proptest",
- "thiserror",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -692,6 +531,167 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "schweep-batch"
+version = "0.0.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "parquet",
+ "schweep-circuit",
+ "schweep-log",
+ "schweep-memo",
+ "schweep-ops",
+ "schweep-oracle",
+ "schweep-plan",
+ "schweep-sql",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-circuit"
+version = "0.0.0"
+dependencies = [
+ "schweep-log",
+ "schweep-ops",
+ "schweep-plan",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-crash"
+version = "0.0.0"
+dependencies = [
+ "schweep-batch",
+ "schweep-circuit",
+ "schweep-differential",
+ "schweep-log",
+ "schweep-ops",
+ "schweep-plan",
+ "schweep-state",
+ "schweep-zset",
+]
+
+[[package]]
+name = "schweep-differential"
+version = "0.0.0"
+dependencies = [
+ "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
+ "schweep-batch",
+ "schweep-circuit",
+ "schweep-log",
+ "schweep-memo",
+ "schweep-ops",
+ "schweep-oracle",
+ "schweep-plan",
+ "schweep-soak",
+ "schweep-sql",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-log"
+version = "0.0.0"
+dependencies = [
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-memo"
+version = "0.0.0"
+dependencies = [
+ "schweep-circuit",
+ "schweep-ops",
+ "schweep-oracle",
+ "schweep-plan",
+ "schweep-sql",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-ops"
+version = "0.0.0"
+dependencies = [
+ "schweep-plan",
+ "schweep-state",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-oracle"
+version = "0.0.0"
+dependencies = [
+ "schweep-plan",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-plan"
+version = "0.0.0"
+dependencies = [
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-soak"
+version = "0.0.0"
+dependencies = [
+ "schweep-circuit",
+ "schweep-differential",
+ "schweep-memo",
+ "schweep-plan",
+ "schweep-sql",
+ "schweep-state",
+ "schweep-zset",
+]
+
+[[package]]
+name = "schweep-sql"
+version = "0.0.0"
+dependencies = [
+ "schweep-circuit",
+ "schweep-ops",
+ "schweep-plan",
+ "schweep-state",
+ "schweep-zset",
+ "sqlparser",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-state"
+version = "0.0.0"
+dependencies = [
+ "redb",
+ "schweep-zset",
+ "thiserror",
+]
+
+[[package]]
+name = "schweep-zset"
+version = "0.0.0"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-schema",
+ "proptest",
+ "thiserror",
+]
 
 [[package]]
 name = "semver"

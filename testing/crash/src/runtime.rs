@@ -1,15 +1,15 @@
 //! A durable run of a scenario: log, circuit, checkpoints, and recovery.
 //!
 //! This is the object a crash lands in the middle of. It owns the three durable things —
-//! `current-log`'s segment, the checkpoint directory, and the circuit whose state they protect — and
+//! `schweep-log`'s segment, the checkpoint directory, and the circuit whose state they protect — and
 //! sequences them in the orderings `docs/DURABILITY.md` numbers.
 
 use std::path::{Path, PathBuf};
 
-use current_circuit::{checkpoint, Circuit};
-use current_differential::{CircuitEngine, EngineUnderTest, Scenario};
-use current_log::{Ack, FaultInjector, FaultPlan, Log, Seam, SyncPolicy};
-use current_zset::{EpochDeltas, Schema};
+use schweep_circuit::{checkpoint, Circuit};
+use schweep_differential::{CircuitEngine, EngineUnderTest, Scenario};
+use schweep_log::{Ack, FaultInjector, FaultPlan, Log, Seam, SyncPolicy};
+use schweep_zset::{EpochDeltas, Schema};
 
 use crate::scenario_fault::Fault;
 
@@ -67,7 +67,7 @@ pub fn without_emission_counts(fingerprint: &str) -> String {
 pub struct Durable {
     dir: PathBuf,
     tables: Vec<(String, Schema)>,
-    query: current_plan::Query,
+    query: schweep_plan::Query,
     log: Log,
     circuit: Circuit,
     sync: SyncPolicy,
@@ -114,7 +114,7 @@ pub struct Config {
     /// Whether the log and checkpoints call `fsync`.
     ///
     /// The 10,000-cycle gate uses `Deferred`, because an in-process crash cannot observe the
-    /// difference and `Full` costs hours. See `current_log::SyncPolicy` for the argument, and for
+    /// difference and `Full` costs hours. See `schweep_log::SyncPolicy` for the argument, and for
     /// what it means the gate does *not* test.
     pub sync: SyncPolicy,
 }
@@ -189,7 +189,7 @@ impl Durable {
             .and_then(|name| name.strip_prefix("snap-"))
             .and_then(|digits| digits.parse::<u64>().ok())
             .unwrap_or(0);
-        current_batch::compact::cleanup(&log_dir(&dir), live).map_err(|e| e.to_string())?;
+        schweep_batch::compact::cleanup(&log_dir(&dir), live).map_err(|e| e.to_string())?;
 
         // Build a circuit of the right shape. Recovery restores state into it; it never has to guess
         // the shape, because the plan is the same plan.
@@ -206,7 +206,7 @@ impl Durable {
             Backend::Redb => {
                 let spill = state_dir(&dir);
                 let _ = std::fs::remove_dir_all(&spill);
-                let mut factory = current_state::RedbFactory::new(&spill);
+                let mut factory = schweep_state::RedbFactory::new(&spill);
                 CircuitEngine::build_with(&scenario.tables, &scenario.query, &mut factory)
                     .map_err(|e| e.to_string())?
             }
@@ -244,10 +244,10 @@ impl Durable {
             let catalog: std::collections::BTreeMap<String, Schema> =
                 scenario.tables.iter().cloned().collect();
             let integrals =
-                current_batch::hydrate::accumulated_upto(&log, &catalog, log.retained_from())
+                schweep_batch::hydrate::accumulated_upto(&log, &catalog, log.retained_from())
                     .map_err(|e| e.to_string())?;
             let one_delta =
-                current_batch::hydrate::as_one_delta(&integrals).map_err(|e| e.to_string())?;
+                schweep_batch::hydrate::as_one_delta(&integrals).map_err(|e| e.to_string())?;
             circuit.step(&one_delta).map_err(|e| e.to_string())?;
             // The circuit is now as of the snapshot's epoch, however many epochs that took to build.
             circuit
@@ -382,9 +382,9 @@ impl Durable {
         }
         let catalog: std::collections::BTreeMap<String, Schema> =
             self.tables.iter().cloned().collect();
-        let integrals = current_batch::hydrate::accumulated_upto(&self.log, &catalog, anchor)
+        let integrals = schweep_batch::hydrate::accumulated_upto(&self.log, &catalog, anchor)
             .map_err(|e| e.to_string())?;
-        current_batch::compact(&mut self.log, anchor, &integrals, faults, self.sync)
+        schweep_batch::compact(&mut self.log, anchor, &integrals, faults, self.sync)
             .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -394,7 +394,7 @@ impl Durable {
         let catalog: std::collections::BTreeMap<String, Schema> =
             self.tables.iter().cloned().collect();
         let integrals =
-            current_batch::hydrate::accumulated(&self.log, &catalog).map_err(|e| e.to_string())?;
+            schweep_batch::hydrate::accumulated(&self.log, &catalog).map_err(|e| e.to_string())?;
         let mut out = format!(
             "log @ epoch {} · {} token(s)\n",
             self.log.sealed_epoch(),
@@ -449,7 +449,7 @@ impl Durable {
     }
 
     #[must_use]
-    pub fn query(&self) -> &current_plan::Query {
+    pub fn query(&self) -> &schweep_plan::Query {
         &self.query
     }
 

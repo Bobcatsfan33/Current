@@ -8,11 +8,11 @@
 //!
 //! A harness that cannot be trusted would make every later sprint's green tick meaningless, and
 //! the cheapest time to find out is before there is an engine to blame. From C1, one side becomes
-//! `current-circuit` and the comparison starts testing the engine instead (I-1).
+//! `schweep-circuit` and the comparison starts testing the engine instead (I-1).
 
-use current_oracle::Oracle;
-use current_plan::Query;
-use current_zset::{Canonical, EpochDeltas, Schema};
+use schweep_oracle::Oracle;
+use schweep_plan::Query;
+use schweep_zset::{Canonical, EpochDeltas, Schema};
 
 use crate::engine::EngineUnderTest;
 
@@ -92,7 +92,7 @@ impl EngineUnderTest for SaboteurEngine {
         let truth = self.inner.answer()?;
         let mut entries = truth.entries().to_vec();
         entries.pop();
-        current_zset::ZSetBatch::from_entries(truth.schema().clone(), entries)
+        schweep_zset::ZSetBatch::from_entries(truth.schema().clone(), entries)
             .and_then(|b| b.canonical())
             .map_err(|e| e.to_string())
     }

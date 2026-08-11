@@ -10,12 +10,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::{
+use schweep_differential::{
     compare, sweep_matching, CircuitEngine, Family, OracleEngine, Scenario,
 };
-use current_plan::plan::{GroupBy, Named, Query, Source};
-use current_plan::{AggFunc, Expr};
-use current_zset::{DataType, Field, Schema};
+use schweep_plan::plan::{GroupBy, Named, Query, Source};
+use schweep_plan::{AggFunc, Expr};
+use schweep_zset::{DataType, Field, Schema};
 
 /// How many seeds to sweep to reach ~1,000 filter/project scenarios.
 ///
@@ -39,7 +39,7 @@ fn is_rung_one(scenario: &Scenario) -> bool {
 /// be asserting the absence of errors rather than the property it is about. Rendering both means the
 /// comparison covers error text too, which is what I-1 requires.
 fn rendered(engine: &CircuitEngine) -> String {
-    use current_differential::EngineUnderTest;
+    use schweep_differential::EngineUnderTest;
     match engine.answer() {
         Ok(answer) => answer.render(),
         Err(message) => format!("ERROR: {message}"),
@@ -152,7 +152,7 @@ fn the_gate_population_is_full_of_retractions() {
 /// whole result store.
 #[test]
 fn i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers() {
-    use current_differential::EngineUnderTest;
+    use schweep_differential::EngineUnderTest;
 
     let mut checked = 0;
     for seed in 0..SEEDS {
@@ -218,7 +218,7 @@ fn i2_two_runs_of_a_scenario_produce_byte_identical_state_and_answers() {
 /// declared `unbounded` and then kept everything would satisfy the runtime check and fail here.
 #[test]
 fn linear_operators_declare_and_hold_no_state() {
-    use current_differential::EngineUnderTest;
+    use schweep_differential::EngineUnderTest;
 
     let mut checked = 0;
     for seed in 0..SEEDS {
@@ -265,8 +265,8 @@ fn linear_operators_declare_and_hold_no_state() {
 /// carrying something across epochs that it should not be.
 #[test]
 fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
-    use current_differential::EngineUnderTest;
-    use current_zset::EpochDeltas;
+    use schweep_differential::EngineUnderTest;
+    use schweep_zset::EpochDeltas;
 
     let mut checked = 0;
     for seed in 0..SEEDS {
@@ -314,7 +314,7 @@ fn feeding_the_whole_history_as_one_epoch_gives_the_same_answer() {
 /// **binder**, which names the construct (S-12) — not by a hand-written check in an adapter.
 #[test]
 fn the_engine_builds_the_whole_dialect_and_the_binder_refuses_the_rest() {
-    use current_differential::EngineUnderTest;
+    use schweep_differential::EngineUnderTest;
 
     let ints = |names: &[&str]| {
         Schema::new_table(
@@ -392,7 +392,7 @@ fn the_engine_builds_the_whole_dialect_and_the_binder_refuses_the_rest() {
 /// and the harness must still notice.
 #[test]
 fn the_gate_would_catch_a_wrong_circuit() {
-    use current_differential::SaboteurEngine;
+    use schweep_differential::SaboteurEngine;
 
     let mut caught = 0;
     let mut examined = 0;

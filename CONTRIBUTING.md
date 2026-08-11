@@ -1,6 +1,6 @@
-# Contributing to Current
+# Contributing to Schweep
 
-Current is an incremental-first query engine. Its credibility rests on one thing: every answer it
+Schweep is an incremental-first query engine. Its credibility rests on one thing: every answer it
 gives is checked, in CI, against a naive reference implementation that recomputes from scratch.
 Contributions are welcome on exactly those terms.
 

@@ -40,7 +40,7 @@
     {
       "name": "CACHE_BYTES",
       "value": 1048576,
-      "location": "crates/current-state/src/redb_backend.rs",
+      "location": "crates/schweep-state/src/redb_backend.rs",
       "steers": "redb's in-memory page cache, per operator backend. It is the dominant term in the engine's resident memory when state is spilled to disk.",
       "justification": "Measured on the C8 ceiling shape, which drives operator state to hundreds of megabytes on disk and samples RSS throughout. At 1 / 8 / 32 MiB the peak resident memory was 38 / 67 / 106 MB and the post-warm-up growth 16.8% / 37.0% / 114.9% — the cache is not a small term, it is THE term. 1 MiB is chosen because the cache is per-operator, so a dataflow with twenty stateful operators holds twenty of them: at 1 MiB that is 20 MiB, a small share of any ceiling this gate runs at, and the measured curve then converges: at the committed setting the artifact records a peak of 38,371,328 bytes of RSS against 1,077,944,320 bytes of state, a ratio of 28.1 to 1, with post-warm-up RSS growth of -1.75% while state grew 700%. What this value is NOT chosen for is read throughput, which C10 owns and will trade against this number with a benchmark rather than an argument.",
       "artifact": "testing/evidence/c8-cache-sweep.json",
@@ -50,7 +50,7 @@
     {
       "name": "BYTES_PER_ENTRY_LOW",
       "value": 48,
-      "location": "crates/current-memo/src/costs.rs",
+      "location": "crates/schweep-memo/src/costs.rs",
       "steers": "The floor EXPLAIN STATE publishes for a given entry count, and therefore what the reconciliation gate asserts the backend must occupy at least.",
       "justification": "Measured: at scale a redb entry costs between 72 and 205 bytes on disk depending on key width (12 measurements, two key widths, 100 to 500,000 entries). 48 sits below the narrowest of those with margin, so the floor is a bound rather than a fit. It is a floor and not half of an envelope because there is NO upper bound to publish: key width is unbounded, and the ceiling gate proved it by reaching 2,556 bytes per entry with a 480-character padding column.",
       "artifact": "testing/evidence/c8-state-costs.json",
@@ -60,7 +60,7 @@
     {
       "name": "BYTES_PER_BACKEND",
       "value": 1056768,
-      "location": "crates/current-memo/src/costs.rs",
+      "location": "crates/schweep-memo/src/costs.rs",
       "steers": "What EXPLAIN STATE allows an EMPTY set of backends to occupy, and therefore the presence half of the reconciliation gate: reporting no entries while the disk holds more than this is a lie the gate catches.",
       "justification": "Measured: a freshly created redb file preallocates 1,056,768 bytes. The first draft of this constant guessed 12,288 — a hundredfold error, corrected by the measurement. It is charged only to the empty allowance and not to the floor, because redb truncates on commit: at 1,500 entries the same file measures 593,920 bytes, SMALLER than when empty, so a floor that charged the preallocation would claim a minimum the store routinely goes below.",
       "artifact": "testing/evidence/c8-state-costs.json",

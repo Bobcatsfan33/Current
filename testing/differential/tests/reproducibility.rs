@@ -7,7 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::{compare, OracleEngine, Scenario};
+use schweep_differential::{compare, OracleEngine, Scenario};
 
 /// The same seed produces a byte-identical scenario: same schemas, same query, same deltas.
 #[test]
@@ -72,7 +72,7 @@ fn different_seeds_produce_different_scenarios() {
 /// something downstream is order-sensitive, which I-2 forbids.
 #[test]
 fn shuffling_the_entries_within_an_epoch_does_not_change_any_answer() {
-    use current_zset::EpochDeltas;
+    use schweep_zset::EpochDeltas;
 
     for seed in 0..200_u64 {
         let scenario = Scenario::generate(seed).unwrap();

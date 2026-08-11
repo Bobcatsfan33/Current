@@ -1,4 +1,4 @@
-//! `current-circuit` wearing the [`EngineUnderTest`] costume — the **typed door** of I-6.
+//! `schweep-circuit` wearing the [`EngineUnderTest`] costume — the **typed door** of I-6.
 //!
 //! This is the file C0 was built to make possible. With it, the differential harness compares an
 //! *incremental* engine to a *recompute-from-scratch* one, at every sealed epoch, over the same
@@ -15,17 +15,17 @@
 //! ## Where the wiring went (C5)
 //!
 //! It used to be here: this file walked a `Query` and called `CircuitBuilder` directly. It no longer
-//! does, because C5 gave that job to `current_sql::incremental` and two implementations of one
+//! does, because C5 gave that job to `schweep_sql::incremental` and two implementations of one
 //! translation is exactly the thing I-6 exists to prevent. The typed door now calls
-//! [`current_sql::incrementalize_typed`] and the SQL door calls `current_sql::compile`; both end in
-//! `current_sql::instantiate`. There is one path from a query to a circuit, and this file is a caller
+//! [`schweep_sql::incrementalize_typed`] and the SQL door calls `schweep_sql::compile`; both end in
+//! `schweep_sql::instantiate`. There is one path from a query to a circuit, and this file is a caller
 //! of it rather than a copy.
 
-use current_circuit::Circuit;
-use current_plan::bind::Catalog;
-use current_plan::plan::Query;
-use current_sql::{incrementalize_typed, instantiate, CircuitPlan};
-use current_zset::{Canonical, EpochDeltas, Schema};
+use schweep_circuit::Circuit;
+use schweep_plan::bind::Catalog;
+use schweep_plan::plan::Query;
+use schweep_sql::{incrementalize_typed, instantiate, CircuitPlan};
+use schweep_zset::{Canonical, EpochDeltas, Schema};
 
 use crate::engine::EngineUnderTest;
 use crate::scenario::{Family, Scenario};
@@ -91,10 +91,10 @@ impl CircuitEngine {
     pub fn build_with(
         tables: &[(String, Schema)],
         query: &Query,
-        factory: &mut dyn current_state::BackendFactory,
+        factory: &mut dyn schweep_state::BackendFactory,
     ) -> Result<Self, String> {
         let plan = CircuitEngine::plan(tables, query)?;
-        let circuit = current_sql::instantiate_with(&plan, factory).map_err(|e| e.to_string())?;
+        let circuit = schweep_sql::instantiate_with(&plan, factory).map_err(|e| e.to_string())?;
         Ok(CircuitEngine { circuit })
     }
 }

@@ -56,11 +56,11 @@
     clippy::indexing_slicing
 )]
 
-use current_memo::{explain_circuit, CostModel};
-use current_plan::bind::Catalog;
-use current_soak::{ceiling, Ceiling, Curve};
-use current_state::{BackendFactory, RedbFactory};
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_memo::{explain_circuit, CostModel};
+use schweep_plan::bind::Catalog;
+use schweep_soak::{ceiling, Ceiling, Curve};
+use schweep_state::{BackendFactory, RedbFactory};
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 /// The multiplier §6 C8 asks for: state at least this many times the ceiling.
 const MULTIPLIER: u64 = 10;
@@ -155,15 +155,15 @@ fn operator_state_many_times_the_ceiling_completes_with_flat_memory() {
         ceiling.describe()
     );
 
-    let root = std::env::temp_dir().join(format!("current-c8-ceiling-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("schweep-c8-ceiling-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let spill = root.join("state");
 
     let catalog = catalog();
     let sql = format!("SELECT a.id AS id FROM a JOIN b ON a.id = b.id WHERE a.id < {ANSWER_KEYS}");
-    let plan = current_sql::compile(&sql, &catalog).unwrap();
+    let plan = schweep_sql::compile(&sql, &catalog).unwrap();
     let mut factory = RedbFactory::new(&spill);
-    let mut circuit = current_sql::instantiate_with(&plan, &mut factory).unwrap();
+    let mut circuit = schweep_sql::instantiate_with(&plan, &mut factory).unwrap();
 
     let mut curve = Curve::default();
     let mut rows_written = 0i64;
@@ -198,7 +198,7 @@ fn operator_state_many_times_the_ceiling_completes_with_flat_memory() {
         epochs += 1;
         curve.sample();
         state_bytes = directory_bytes(&spill);
-        if curve.len() == current_soak::Curve::WARM_UP_SAMPLES {
+        if curve.len() == schweep_soak::Curve::WARM_UP_SAMPLES {
             state_at_warm_up = state_bytes;
         }
 
@@ -350,7 +350,7 @@ fn operator_state_many_times_the_ceiling_completes_with_flat_memory() {
     );
 
     // ---- and EXPLAIN STATE still reconciles, at this size -----------------------------------------
-    let reconciliation = current_memo::reconcile_circuit(
+    let reconciliation = schweep_memo::reconcile_circuit(
         &circuit,
         CostModel::redb(),
         factory.describe(),

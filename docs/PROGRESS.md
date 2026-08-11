@@ -10,7 +10,26 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C2** — join | **complete; exit gate green in CI** |
 | **C3** — aggregates and distinct | **complete; exit gate green in CI** |
 | **C4** — durability | **exit gate green in CI; `RocksBackend` NOT delivered — see below** |
-| C5 … C13 | not started |
+| **C5** — the SQL frontend and the incrementalizer | **complete; exit gate green in CI** |
+| **C6** — the memo: standing queries and shared circuitry | **complete; exit gate green in CI** |
+| **C7** — one-shot queries, Parquet ground truth, compaction | **complete; exit gate green in CI** |
+| **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18's freeze now FINAL** |
+| C9 … C13 | not started |
+
+> **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
+> while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
+> worth of status was wrong in the one place a reader looks first, and the sections underneath were
+> right the whole time — which is the failure mode a summary table has and its sections do not.
+>
+> Corrected visibly rather than silently, because a status table that has been wrong once should say so:
+> a reader who trusted it in that window deserves to know the window existed. **The rule this leaves
+> behind:** the table is part of the sprint's exit, not a thing to update afterwards, and a sprint that
+> adds a section without adding its row has not finished.
+
+**How to read this document.** Each sprint below states what its gate proved, what it did *not* prove,
+and what the next sprint needs. The "does not prove" sections are the load-bearing ones: they are where a
+limitation is recorded before a user finds it (I-10), and several of them carry a **Scheduled: Cn** marker
+naming the sprint that must resolve them.
 
 ---
 
@@ -27,7 +46,7 @@ exists.* That is what happened: there is no engine in this repository, deliberat
 | --- | --- | --- |
 | CI green (fmt, clippy `-D warnings`, test, no-network) | `.github/workflows/ci.yml` | all green, plus the aggregate `ci` check — 5 jobs |
 | Harness runs oracle-vs-oracle over 1,000 randomized scenarios | `oracle_vs_oracle_over_one_thousand_randomized_scenarios` | 1,000 scenarios, 4,668 epochs, 5,668 answer comparisons, 0 divergences |
-| Property tests for Z-set algebra pass | `crates/current-zset/tests/properties.rs` | 13 property tests |
+| Property tests for Z-set algebra pass | `crates/schweep-zset/tests/properties.rs` | 13 property tests |
 | A seeded scenario is reproducible byte-for-byte from its seed | `a_seed_reproduces_its_scenario_byte_for_byte`, `a_seed_reproduces_its_run_byte_for_byte` | byte-identical scenario *and* run |
 
 **122 tests**, zero ignored, zero skipped, zero flaky. (The workspace total is now 152; the
@@ -35,7 +54,7 @@ extra 30 arrived with C1 and the refactor that preceded it.)
 
 ### What is proven, and by which test
 
-**Z-set algebra** — `crates/current-zset/`
+**Z-set algebra** — `crates/schweep-zset/`
 
 | Claim | Test |
 | --- | --- |
@@ -51,7 +70,7 @@ extra 30 arrived with C1 and the refactor that preceded it.)
 | Weight overflow is refused, not wrapped (D-11) | `negate_refuses_i64_min_rather_than_saturating`, `consolidate_reports_weight_overflow_rather_than_wrapping` |
 | Arrow round-trips entries exactly (D-2) | `arrow_round_trip_preserves_entries`, `from_arrow_agrees_with_from_entries` |
 
-**Semantics of rungs 1–3** — `crates/current-oracle/tests/semantics.rs` (39 tests)
+**Semantics of rungs 1–3** — `crates/schweep-oracle/tests/semantics.rs` (39 tests)
 
 | Claim | Test |
 | --- | --- |
@@ -119,8 +138,8 @@ Stated plainly, because a progress document that only lists wins is marketing.
   `SaboteurEngine` is what stops that from being vacuous.
 - **Nothing about durability, crash recovery, concurrency, or the network.** C4 and C9.
 - **No performance claim of any kind**, and no benchmark artifact exists.
-  `testing/evidence/registry.json` is empty because nothing is tuned. Both `current-zset` and
-  `current-oracle` are knowingly slow: consolidation materialises rows out of the columnar batch,
+  `testing/evidence/registry.json` is empty because nothing is tuned. Both `schweep-zset` and
+  `schweep-oracle` are knowingly slow: consolidation materialises rows out of the columnar batch,
   and the oracle replays the entire log prefix on every question, with a nested-loop join.
 - **I-1 is not yet exercised in anger.** The oracle law needs two different implementations. It
   gets one in C1.
@@ -147,12 +166,12 @@ moved first and the code followed, which is the order §10 requires.
 
 C1 is *linear operators + the first real circuit*. Everything it needs from C0 exists:
 
-- **The seam.** `EngineUnderTest` in `testing/differential/src/engine.rs` is what `current-circuit`
+- **The seam.** `EngineUnderTest` in `testing/differential/src/engine.rs` is what `schweep-circuit`
   implements. Add an adapter, put it on one side of `compare`, and the 1,000-scenario gate becomes
   a real engine-vs-oracle gate — that is the C1 exit gate.
 
   *Correction, made in C1:* this section originally claimed "nothing in the harness mentions the
-  oracle's types". That was false — the trait imported `current_oracle::Query`, and a comment in
+  oracle's types". That was false — the trait imported `schweep_oracle::Query`, and a comment in
   `engine.rs` asserted the opposite of what the file did. It cost C1 a preparatory refactor
   (D-14) rather than "one file". The claim is true now because the types moved to a neutral
   crate, not because the wording was softened.
@@ -162,13 +181,13 @@ C1 is *linear operators + the first real circuit*. Everything it needs from C0 e
 - **The I-2 gate.** C1 must show that two runs of one scenario produce byte-identical state and
   answers. `a_seed_reproduces_its_run_byte_for_byte` is that test with the engine substituted in.
 - **The spec.** `docs/SEMANTICS.md` S-23, S-24, S-25 define scan, filter, and projection, and
-  `crates/current-oracle/tests/semantics.rs` pins them. C1's operators are held to those rules and
+  `crates/schweep-oracle/tests/semantics.rs` pins them. C1's operators are held to those rules and
   do not get to reinterpret them.
 
 One thing C1 will have to decide, flagged now rather than discovered later: `EpochInput` and the
 oracle's `EpochDeltas` are two spellings of the same idea, and they exist separately only because
-`current-log` does not arrive until C4. When the circuit lands, one of them should become the
-shared type — most naturally in `current-zset`, since it is the delta representation and every
+`schweep-log` does not arrive until C4. When the circuit lands, one of them should become the
+shared type — most naturally in `schweep-zset`, since it is the delta representation and every
 crate already depends on it.
 
 Per the sprint protocol in `CLAUDE.md`, **C1 does not begin in the session that finished C0.**
@@ -223,7 +242,7 @@ the two gates are not substitutes.
 
 ### What is proven, and by which test
 
-**The operators** — `crates/current-ops/`
+**The operators** — `crates/schweep-ops/`
 
 | Claim | Test |
 | --- | --- |
@@ -231,9 +250,9 @@ the two gates are not substitutes.
 | Projection merges rows and sums weights (S-25) | `a_hand_built_circuit_maintains_its_answer_from_deltas` |
 | A non-Boolean predicate is refused at construction, not at data time (S-17) | `a_non_boolean_predicate_is_refused_at_construction` |
 | **Linear operators declare and hold no state** — §6 C1's pitfall, as an assertion | `linear_operators_declare_and_hold_no_state`, plus the runtime check in every step |
-| Projection's output schema comes from the shared binder, so it cannot drift from the oracle's (S-11, D-14) | `Project::new` calls `current_plan::projection_schema`; the gate would show any drift as a schema mismatch |
+| Projection's output schema comes from the shared binder, so it cannot drift from the oracle's (S-11, D-14) | `Project::new` calls `schweep_plan::projection_schema`; the gate would show any drift as a schema mismatch |
 
-**The circuit** — `crates/current-circuit/`
+**The circuit** — `crates/schweep-circuit/`
 
 | Claim | Test |
 | --- | --- |
@@ -283,7 +302,7 @@ arrive with the join in C2, which is the first sprint with state to account for.
   depends on the undecided part.
 - **Shared scalar code is not covered by I-1.** The oracle and the engine call the same expression
   evaluator (D-14), so a bug inside it produces the same wrong answer on both sides and the harness
-  cannot see it. `current-plan`'s own unit tests pin that code to `docs/SEMANTICS.md` directly.
+  cannot see it. `schweep-plan`'s own unit tests pin that code to `docs/SEMANTICS.md` directly.
 - **No durability, no sharing, no SQL, no network.** C4, C6, C5, C9. Circuits are hand-built by
   design (§6 C1); the incrementalizer that compiles a plan into one is C5.
 - **No performance claim.** The engine has never been benchmarked and no artifact exists. Both
@@ -296,11 +315,11 @@ arrive with the join in C2, which is the first sprint with state to account for.
 
 Before any engine code, three things from review (one commit, no behaviour change):
 
-- **D-14 · `current-plan`.** The plan IR, the binder, and the scalar expression library left
-  `current-oracle` for a neutral crate — recorded in `docs/DECISIONS.md` *before* the move, because
+- **D-14 · `schweep-plan`.** The plan IR, the binder, and the scalar expression library left
+  `schweep-oracle` for a neutral crate — recorded in `docs/DECISIONS.md` *before* the move, because
   it extends §5's crate map. From C1 there are two implementations of the query surface and neither
   may own the definition of what a query is.
-- **One delta type.** `current-zset::EpochDeltas` replaced the harness's `EpochInput` and the
+- **One delta type.** `schweep-zset::EpochDeltas` replaced the harness's `EpochInput` and the
   oracle's private copy. This corrected a comment in `engine.rs` that asserted the opposite of what
   the file did, and a claim in C0's section of this document that repeated it. Both now say what is
   true, and say that they were wrong.
@@ -416,7 +435,7 @@ real per-operator input integrals, which is `EXPLAIN STATE` in C8.
 
 ### Also in C2
 
-- **`current-state`** (§5.5, §6 C2's "MemBackend"): the `StateBackend` trait and `MemBackend`. The
+- **`schweep-state`** (§5.5, §6 C2's "MemBackend"): the `StateBackend` trait and `MemBackend`. The
   join reaches its indexes only through the trait, so C4 can hand it a `RocksBackend` without the
   operator changing (§2). Keys are `Vec<Value>` ordered by S-7 rather than bytes — **D-15**, with
   the reasoning and the cost. Named snapshots are deliberately absent until C4 designs the
@@ -464,7 +483,7 @@ ledger's generator entries are regenerated because the population will have move
 ### What C3 needs
 
 - **`GROUP BY` semantics are already decided and pinned.** S-27 through S-32, and 12 tests in
-  `crates/current-oracle/tests/semantics.rs` — drained groups vanish, MIN reveals the
+  `crates/schweep-oracle/tests/semantics.rs` — drained groups vanish, MIN reveals the
   second-smallest under retraction, `COUNT` of an all-null group is 0 while `SUM` is NULL, AVG lands
   exactly on the weighted quotient. The engine is held to those, and does not get to reinterpret
   them.
@@ -637,7 +656,7 @@ the enforced one. Both now come from one function (`Circuit::state_budget`).
   changed group's whole multiset. The engine-constant section of the ledger is still empty and
   `no_engine_constant_steers_behaviour_without_a_receipt` fails if that changes without a receipt.
 - **A bug in shared code is still invisible to I-1.** The scalar library and the binder are shared
-  (D-14); `current-plan`'s own tests pin them to `docs/SEMANTICS.md` directly.
+  (D-14); `schweep-plan`'s own tests pin them to `docs/SEMANTICS.md` directly.
 
 ### What C4 needs
 
@@ -653,7 +672,7 @@ the enforced one. Both now come from one function (`Circuit::state_budget`).
   to its uncrashed twin is the same comparison with a crash in the middle.
 - **fsync ordering must be written down before it is implemented** (§6 C4's pitfall): state flush →
   checkpoint record → log trim, in a doc comment, with the crash harness killing between each pair.
-- **`EpochDeltas` should move to `current-log`.** It sits in `current-zset` because C4 had not
+- **`EpochDeltas` should move to `schweep-log`.** It sits in `schweep-zset` because C4 had not
   happened yet (D-14); C4 is when the write path arrives and it can go where §5.4 puts it.
 
 Per the sprint protocol in `CLAUDE.md`, **C4 does not begin in the session that finished C3.**
@@ -777,13 +796,13 @@ path that quietly stops being reached.
 
 ### What C5 needs
 
-- **The plan type is already shared** (`current-plan`, D-14), which is what I-6 will be checked
-  against: SQL text and the typed API must produce the same `current_plan::Query`.
+- **The plan type is already shared** (`schweep-plan`, D-14), which is what I-6 will be checked
+  against: SQL text and the typed API must produce the same `schweep_plan::Query`.
 - **Q-3 is the only open question left**, and C5 must settle it: grand-total aggregation over an empty
   input (S-33). Doc first.
 - **The gate infrastructure is ready.** `sweep_matching` takes a predicate, so a SQL door adds a second
   `EngineUnderTest` rather than a second harness.
-- **`EpochDeltas` can now move to `current-log`**, where §5.4 puts it. It has lived in `current-zset`
+- **`EpochDeltas` can now move to `schweep-log`**, where §5.4 puts it. It has lived in `schweep-zset`
   since C1 only because the log did not exist.
 
 Per the sprint protocol in `CLAUDE.md`, **C5 does not begin in the session that finished C4.**
@@ -794,7 +813,7 @@ Per the sprint protocol in `CLAUDE.md`, **C5 does not begin in the session that 
 
 **Objective (§6):** the same-door moment — SQL in, circuits out.
 
-Everything on §6 C5's list is delivered: `current-sql` (parser gate, binder, incrementalizer, plan
+Everything on §6 C5's list is delivered: `schweep-sql` (parser gate, binder, incrementalizer, plan
 type, instantiator), the SQL fuzzer, the I-6 plan and counter gates, and both canonical mutations. Two
 things are worth reading before the tables: **Q-3 is closed** (D-20), and **the SQL door is narrower
 than the typed API** in one specific way that is counted rather than glossed.
@@ -848,9 +867,9 @@ emitted only when the select list is not already the answer).
 | **S-19** untyped `NULL` | refused; write `CAST(NULL AS <type>)`, the only accepted cast | Inference would be a second analysis of the query, living in one door, that must agree with S-19's table |
 | **S-32** `AggregateInHaving` | a real refusal now, with `AggregateInWhere`, `NestedAggregate` and `AggregateNotTopLevel` beside it | SQL text can write what the typed API cannot represent; each place gets its own name |
 
-### Part 3 — `current-sql`, and where the documentation went
+### Part 3 — `schweep-sql`, and where the documentation went
 
-`crates/current-sql/src/incremental.rs` is the best-documented file in the repository, as §5.6 requires:
+`crates/schweep-sql/src/incremental.rs` is the best-documented file in the repository, as §5.6 requires:
 the three DBSP rules (linear, bilinear, stateful) each stated with the algebra, the reason it holds for
 the operators it covers, and the trap it sets. Every plan node carries its rule as **data**
 (`CircuitNode::rule`), so "this operator is linear" is a claim a test checks rather than a comment.
@@ -863,7 +882,7 @@ instead of two 64-bit numbers.
 Two honest notes about that file:
 
 - It performs **no general `δ`/`∫` rewrite**. Each logical operator has exactly one incremental
-  implementation, already in `current-ops`, so the incrementalizer chooses it and records why. The
+  implementation, already in `schweep-ops`, so the incrementalizer chooses it and records why. The
   file says this out loud, and says when a general rewriter would earn its keep (an open operator set,
   several forms per operator, nested time domains — none of which v1 has).
 - It performs **no optimisation**. No pushdown, no reordering, no CSE. An optimiser today would change
@@ -881,7 +900,7 @@ path from a query to a circuit, which is the only way I-6 can mean anything.
 | I-6: both doors produce structurally identical plans (hash equality) | `i6_the_two_doors_compile_to_structurally_identical_plans` | **2,028 plan pairs**, compared as s-expressions *and* by FNV-1a hash *and* by answer schema |
 | I-6: identical counters | `i6_the_two_doors_execute_identical_counters` | **470 scenarios** stepped through both doors, per-node counters compared after **every** epoch, 10,022 entries emitted |
 | Every refusal names its construct | `every_construct_outside_the_dialect_is_refused_by_name` | **60 constructs**, each refused by a message containing its name; `the_dialect_itself_is_accepted` proves the refusals are not "everything" |
-| Scalar expression library shared, tested differentially anyway | `current-plan` (D-14) + the fuzzer | unchanged from C3; the SQL door reaches the same `eval` |
+| Scalar expression library shared, tested differentially anyway | `schweep-plan` (D-14) + the fuzzer | unchanged from C3; the SQL door reaches the same `eval` |
 
 **315 tests across the workspace**, zero ignored except the scheduled nightly, zero skipped, zero
 flaky. The C5 gate runs in under a second.
@@ -956,7 +975,7 @@ scratch oracle would have caught it, which is the argument for I-1 in one line.
   says it means sits on the other.
 - **The fuzzer's SQL is written by the same author as the binder.** `sql_render` is a renderer, not an
   independent SQL generator; a shared misconception about SQL would render and bind consistently and
-  the gate would stay green. What guards against that is `crates/current-sql/tests/dialect.rs` — 60
+  the gate would stay green. What guards against that is `crates/schweep-sql/tests/dialect.rs` — 60
   hand-written constructs — and `binder.rs`'s hand-written plans, not the fuzzer.
 - **No grand total, and no `HAVING`, is reached by the fuzzer.** The generator always makes at least
   one group key and sets `having` only through the typed path; both shapes are covered by hand-written
@@ -977,7 +996,7 @@ scratch oracle would have caught it, which is the argument for I-1 in one line.
   what I-6 already does.
 - **The incrementalizer is the place sharing will attach**, and it now has one caller for both doors,
   so a memo lookup inserted there is inserted once.
-- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4's list and
+- **`EpochDeltas` still has not moved to `schweep-log`**, where §5.4 puts it. Named in C4's list and
   still true.
 
 Per the sprint protocol in `CLAUDE.md`, **C6 does not begin in the session that finished C5.**
@@ -996,8 +1015,8 @@ gate. Read two things before the tables: **sharing fails silently in two opposit
 
 ### Recorded first: the SQL door's semantic gate
 
-C5's flag is now **rule 11 in `CLAUDE.md`** and a section at the top of `current-sql`'s crate docs:
-`crates/current-sql/tests/binder.rs` is the semantic gate for the SQL door, and the differential
+C5's flag is now **rule 11 in `CLAUDE.md`** and a section at the top of `schweep-sql`'s crate docs:
+`crates/schweep-sql/tests/binder.rs` is the semantic gate for the SQL door, and the differential
 harness cannot do that job. I-6 makes both doors compile to identical plans, so a binder that turns
 text into a **valid but wrong** plan produces the same plan through both doors, the same answer as the
 oracle for the query it actually compiled, and a green sweep. Every dialect change adds rows to
@@ -1006,7 +1025,7 @@ oracle for the query it actually compiled, and a green sweep. Every dialect chan
 ### One step scheduler, one or many sinks
 
 The memo needed many queries over one dataflow. The obvious way to get that is a second step loop
-inside `current-memo`; it does not have one. A second scheduler would be a second place for epoch
+inside `schweep-memo`; it does not have one. A second scheduler would be a second place for epoch
 discipline, state accounting and error attribution to be wrong, and I-8 would then be comparing two
 runtimes instead of one runtime with sharing on and off. So `Circuit` grew three capabilities and kept
 its single-sink door byte-for-byte intact:
@@ -1029,7 +1048,7 @@ rules are so few is that the two failure modes are not symmetric:
 - too **weak** costs sharing — answers stay right, the engine is slower and fatter;
 - too **strong** is cross-contamination — one query reads another's answer.
 
-So v1 normalizes exactly **one** thing, and `crates/current-memo/src/canonical.rs` carries the full
+So v1 normalizes exactly **one** thing, and `crates/schweep-memo/src/canonical.rs` carries the full
 inventory of what it does *not* normalize with the sharing each omission costs:
 
 | Rule | Test asserting the hash **hit** |
@@ -1145,7 +1164,7 @@ the step count goes **down**, which is the direction the counter half calls succ
   ledger is still empty (I-10). **Scheduled: C10.** §6 C10's exit gate is "every number in the README
   traces to a committed benchmark artifact", and sharing is the number that matters most there —
   (d) *the swarm benchmark*, the cost of the marginal query among 10,000 near-duplicate standing
-  queries, which §6 calls "Current's game, and the benchmark that defines the product". Until then the
+  queries, which §6 calls "Schweep's game, and the benchmark that defines the product". Until then the
   honest claim is a step count, and that is all this document claims.
 - **Canonicalization shares less than it could**, deliberately, and the inventory in `canonical.rs`
   names each case: operand order, aliases, filter merging. Every one of those is a *missed* sharing
@@ -1172,7 +1191,7 @@ the step count goes **down**, which is the direction the counter half calls succ
 - **One-shot queries are a registration and a deregistration.** `register` → `read` → `deregister`
   already does it; what C7 adds is the ephemeral-circuit path that skips the sink bookkeeping, and the
   measurement to say whether skipping it matters.
-- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4's list, named
+- **`EpochDeltas` still has not moved to `schweep-log`**, where §5.4 puts it. Named in C4's list, named
   in C5's, still true.
 
 Per the sprint protocol in `CLAUDE.md`, **C7 does not begin in the session that finished C6.**
@@ -1183,7 +1202,7 @@ Per the sprint protocol in `CLAUDE.md`, **C7 does not begin in the session that 
 
 **Objective (§6):** be a database, not only a subscription engine.
 
-Everything on §6 C7's list is delivered: `current-batch` with one-shot execution through ephemeral
+Everything on §6 C7's list is delivered: `schweep-batch` with one-shot execution through ephemeral
 circuits, Parquet snapshots of the input integrals, log compaction, and bootstrap-from-snapshot. Two
 things to read first: **compaction is the only operation in this repository that deletes committed
 history**, and **the crash gate caught the design document being wrong before any of it shipped.**
@@ -1249,7 +1268,7 @@ original did. `Log::tokens()` names them, so I-4 is compared by identity rather 
 | …and for fresh registrations | same test | a memo registered *after* the compaction, hydrated from snapshot + suffix, answers for the whole history |
 | …and for one-shots over a compacted log | same test | all 5 queries |
 | The snapshot says what the log says | same test | a row inserted and retracted is **absent**; a multiplicity partly retracted is present **at its net weight** |
-| **Four materializations**, Current edition | `four_materializations_of_one_history_agree` | registered at epoch 1 · registered mid-history pre-compaction · registered post-compaction · a one-shot at the end — 4 × 5 answers, all identical, all equal to the oracle |
+| **Four materializations**, Schweep edition | `four_materializations_of_one_history_agree` | registered at epoch 1 · registered mid-history pre-compaction · registered post-compaction · a one-shot at the end — 4 × 5 answers, all identical, all equal to the oracle |
 | I-4 across a compaction | `a_token_acked_before_a_compaction_is_still_dropped_after_it` | every token re-offered live *and* after a reopen is dropped as a replay; a new token is still accepted |
 | Crash injection extends to every new seam | `ten_thousand_crash_and_recover_cycles` | **26 of 26 named seams fired** (18 + 8 new), 4,780 seam faults, 1,832 byte faults, **1,423 cycles recovered by bootstrap** |
 | Recovery mid-compaction lands on the old log | the eight compaction kill points, asserted by the same twin comparison | a crash at any seam before P7 recovers to a state and a log that mean what the uncrashed twin's do |
@@ -1316,7 +1335,7 @@ The three mutations landed in three different instruments, which is the point of
 ### What C7 does **not** prove
 
 - **Compaction is not automatic.** Nothing decides *when* to compact: the crash harness compacts on an
-  interval because that is how the seams get exercised, and `current-batch::compact` is a function
+  interval because that is how the seams get exercised, and `schweep-batch::compact` is a function
   somebody calls. A policy — by log size, by age, by pressure — is a tuning question with a measured
   answer, and C8 owns tuning with the ledger behind it.
 - **A snapshot is per-table, not per-source.** `source_id` travels with every batch and is *not* carried
@@ -1332,7 +1351,7 @@ The three mutations landed in three different instruments, which is the point of
   subprocess kill test existed. **It never has.** That false claim is corrected in the document with the
   correction visible, and the test is **scheduled at C9**, whose exit gate is kill -9 under load at 1,000
   random points. No count in this document is a count of process kills.
-- **`EpochDeltas` still has not moved to `current-log`**, where §5.4 puts it. Named in C4, C5 and C6.
+- **`EpochDeltas` still has not moved to `schweep-log`**, where §5.4 puts it. Named in C4, C5 and C6.
 
 ### What C8 needs
 
@@ -1501,6 +1520,6 @@ instrument rather than a looser threshold. That is the whole reason for applying
   ceiling, which is the one part of C8's claim that a memo cannot make today.
 - **`EXPLAIN STATE` is a client-facing surface waiting for a door.** It is a function returning a struct;
   C9's endpoints are where it becomes something a user can ask for.
-- **`EpochDeltas` still has not moved to `current-log`.** Named in C4, C5, C6 and C7.
+- **`EpochDeltas` still has not moved to `schweep-log`.** Named in C4, C5, C6 and C7.
 
 Per the sprint protocol in `CLAUDE.md`, **C9 does not begin in the session that finished C8.**

@@ -1,7 +1,7 @@
 {
   "$comment": [
     "C8 · what operator state costs, and how far EXPLAIN STATE's byte model is from it (I-10).",
-    "Regenerate: cargo run --release -p current-memo --bin state-costs > testing/evidence/c8-state-costs.json",
+    "Regenerate: cargo run --release -p schweep-memo --bin state-costs > testing/evidence/c8-state-costs.json",
     "Deterministic: the same writes produce the same bytes. No clock, no threads.",
     "Checked by testing/differential/tests/evidence.rs, which recomputes the running-memo",
     "rounds and asserts the recorded tolerance still covers the observed error."

@@ -15,15 +15,15 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use current_crash::{
+use schweep_crash::{
     run_clean, run_with_fault, without_emission_counts, Config, Fault, FaultChoice,
 };
-use current_differential::{CircuitEngine, EngineUnderTest, Scenario};
-use current_log::Seam;
+use schweep_differential::{CircuitEngine, EngineUnderTest, Scenario};
+use schweep_log::Seam;
 
 /// A fresh directory per cycle, named by seed so a failure can be reproduced by hand.
 fn dir_for(seed: u64, tag: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("current-c4-{tag}-{seed}"));
+    let base = std::env::temp_dir().join(format!("schweep-c4-{tag}-{seed}"));
     let _ = std::fs::remove_dir_all(&base);
     base
 }
@@ -200,7 +200,7 @@ fn recovery_is_idempotent_under_a_crash_during_recovery() {
             let _ = run_with_fault(
                 &dir,
                 &scenario,
-                Fault::Seam(current_log::FaultPlan {
+                Fault::Seam(schweep_log::FaultPlan {
                     seam: Seam::SealAfterFsyncBeforeStep,
                     occurrence: 1,
                 }),
@@ -211,7 +211,7 @@ fn recovery_is_idempotent_under_a_crash_during_recovery() {
                 let _ = run_with_fault(
                     &dir,
                     &scenario,
-                    Fault::Seam(current_log::FaultPlan {
+                    Fault::Seam(schweep_log::FaultPlan {
                         seam,
                         occurrence: 1,
                     }),

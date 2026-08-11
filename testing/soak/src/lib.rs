@@ -1,4 +1,4 @@
-//! # current-soak — the soak harness (§6 C8)
+//! # schweep-soak — the soak harness (§6 C8)
 //!
 //! > a scenario with operator state 10× RAM completes with flat memory (the soak harness arrives here —
 //! > RSS sampled across the run, leak fails the job)

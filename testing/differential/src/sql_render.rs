@@ -12,7 +12,7 @@
 //!
 //! ## Why it lives in the test harness
 //!
-//! Nothing in the engine needs to *write* SQL. A renderer in `current-sql` would be production code
+//! Nothing in the engine needs to *write* SQL. A renderer in `schweep-sql` would be production code
 //! whose only caller is a test, and its bugs would then be shipped rather than merely noticed.
 //!
 //! ## What it declines, and why declining is honest
@@ -23,8 +23,8 @@
 
 use std::fmt::Write as _;
 
-use current_plan::plan::{AggFunc, Expr, GroupBy, Named, Query, Source};
-use current_zset::{DataType, Value};
+use schweep_plan::plan::{AggFunc, Expr, GroupBy, Named, Query, Source};
+use schweep_zset::{DataType, Value};
 
 /// Why a typed query has no SQL form. Each variant is a real limit, stated as one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -237,7 +237,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 
     use super::*;
-    use current_plan::plan::BinOp;
+    use schweep_plan::plan::BinOp;
 
     #[test]
     fn a_filter_project_query_renders() {

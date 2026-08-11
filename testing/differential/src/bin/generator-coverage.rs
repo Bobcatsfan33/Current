@@ -1,7 +1,7 @@
 //! Regenerates the receipt for the scenario generator's tuned constants (I-10).
 //!
 //! ```text
-//! cargo run -p current-differential --bin generator-coverage \
+//! cargo run -p schweep-differential --bin generator-coverage \
 //!   > testing/evidence/c0-generator-coverage.json
 //! ```
 //!
@@ -12,7 +12,7 @@
 
 use std::process::ExitCode;
 
-use current_differential::coverage::{measure, ARTIFACT_SEEDS};
+use schweep_differential::coverage::{measure, ARTIFACT_SEEDS};
 
 fn main() -> ExitCode {
     // ARTIFACT_SEEDS lives in the library so this binary and `tests/evidence.rs` can never

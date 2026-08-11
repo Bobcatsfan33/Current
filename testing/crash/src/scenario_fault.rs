@@ -1,7 +1,7 @@
 //! Choosing a fault from a seed (`docs/DURABILITY.md` §5).
 
-use current_differential::Rng;
-use current_log::{FaultPlan, Seam};
+use schweep_differential::Rng;
+use schweep_log::{FaultPlan, Seam};
 
 /// The two kinds of fault the harness injects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

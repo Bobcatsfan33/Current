@@ -25,7 +25,7 @@
 //! table's current contents, so the generator never retracts a row that is not there. That is not
 //! squeamishness — S-5 says such a history has no defined answer, so a scenario containing one
 //! would be asking two implementations to agree about nothing. The oracle's `NegativeIntegral`
-//! check is tested directly instead, in `current-oracle`'s own suite.
+//! check is tested directly instead, in `schweep-oracle`'s own suite.
 //!
 //! ## Expressions that raise
 //!
@@ -38,9 +38,9 @@
 
 use std::collections::BTreeMap;
 
-use current_plan::bind::{bind, bind_source, Catalog};
-use current_plan::plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_plan::bind::{bind, bind_source, Catalog};
+use schweep_plan::plan::{AggFunc, BinOp, Expr, GroupBy, Named, Query, Source};
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 use crate::rng::Rng;
 

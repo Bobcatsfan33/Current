@@ -1,4 +1,4 @@
-//! # current-crash — the crash-injection harness
+//! # schweep-crash — the crash-injection harness
 //!
 //! `ARCHITECTURE.md` §6 C4 and `docs/DURABILITY.md` §5. A durable run of a scenario, a fault chosen
 //! by seed, and a comparison of what recovered against a twin that never crashed.

@@ -63,15 +63,15 @@ jobs:
       # are legible in the job log rather than buried among the unit tests. A green tick that
       # does not say how many scenarios ran is not evidence of much.
       - name: The C0 differential gate (oracle vs oracle — proves the harness)
-        run: cargo test -p current-differential --locked --test oracle_vs_oracle -- --nocapture
+        run: cargo test -p schweep-differential --locked --test oracle_vs_oracle -- --nocapture
       - name: The C1 differential gate (engine vs oracle, rung 1 — proves I-1)
-        run: cargo test -p current-differential --locked --test c1_engine_vs_oracle -- --nocapture
+        run: cargo test -p schweep-differential --locked --test c1_engine_vs_oracle -- --nocapture
       - name: The C2 differential gate (join — the three-term rule)
-        run: cargo test -p current-differential --locked --test c2_join -- --nocapture
+        run: cargo test -p schweep-differential --locked --test c2_join -- --nocapture
       - name: The C3 differential gate (aggregates, distinct, and the whole population)
-        run: cargo test -p current-differential --locked --test c3_aggregate -- --nocapture
+        run: cargo test -p schweep-differential --locked --test c3_aggregate -- --nocapture
       - name: The C4 crash gate (10,000 crash-and-recover cycles)
-        run: cargo test -p current-crash --locked --test c4_crash_gate -- --nocapture
+        run: cargo test -p schweep-crash --locked --test c4_crash_gate -- --nocapture
 
   no-network:
     name: no-network
@@ -133,7 +133,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: The crash gate with every write fsynced
-        run: cargo test -p current-crash --locked --test nightly_full_sync -- --ignored --nocapture
+        run: cargo test -p schweep-crash --locked --test nightly_full_sync -- --ignored --nocapture
 
   # The C8 ceiling gate: operator state ten times a **fixed** memory ceiling, completing with flat
   # memory (§6 C8).
@@ -155,7 +155,7 @@ jobs:
       # Built outside the scope, because compiling under a 128 MiB ceiling would OOM the compiler
       # rather than the test — and the claim is about the engine, not about rustc.
       - name: Build the ceiling gate
-        run: cargo test --release -p current-soak --test c8_ceiling --locked --no-run
+        run: cargo test --release -p schweep-soak --test c8_ceiling --locked --no-run
 
       - name: Run it under a fixed 128 MiB ceiling
         run: |

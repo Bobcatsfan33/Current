@@ -85,12 +85,15 @@ rather you read the tests than the marketing.**
   is not done. Stop, fix it, re-run the gate.
 - **`docs/PROGRESS.md` is updated as part of the sprint**, stating what is proven and by which
   named test. A claim in `PROGRESS.md` without a test that proves it is a violation of I-10.
+  **Its status table at the top counts.** Four sprints once ran green while that table still said
+  "not started", because the table was treated as something to update afterwards and the sections were
+  treated as the real work. A sprint that adds its section without adding its row has not finished.
 
 ### Sprint order (§6)
 
 C0 oracle + harness + rules · C1 linear operators + first circuit · C2 join · C3 aggregates and
 distinct · C4 durability · C5 SQL frontend + incrementalizer · C6 memo · C7 one-shot + Parquet +
-compaction · C8 state spill · C9 currentd · C10 performance · C11 source-scoped retraction ·
+compaction · C8 state spill · C9 schweepd · C10 performance · C11 source-scoped retraction ·
 C12 accelerator spike · C13 hardening and v0.1 freeze.
 
 Serial by default. Do not pull work forward from a later sprint because it is convenient.
@@ -124,9 +127,9 @@ These are consequences of the invariants and the decisions, restated where they 
    entry in `testing/evidence/registry.json`. (I-10)
 10. **The scenario generator emits retractions from day one.** Never weaken the generator to make
     an implementation pass. The generator defines the bar. (§6 C0 pitfalls)
-11. **`crates/current-sql/tests/binder.rs` is the semantic gate for the SQL door.** Every dialect
+11. **`crates/schweep-sql/tests/binder.rs` is the semantic gate for the SQL door.** Every dialect
     change adds a row to its text↔expected-plan corpus, and every refusal adds a row to
-    `crates/current-sql/tests/dialect.rs`. *The differential harness cannot do this job.* I-6 makes
+    `crates/schweep-sql/tests/dialect.rs`. *The differential harness cannot do this job.* I-6 makes
     the two doors compile to identical plans, so a bug that binds SQL text to a **valid but wrong**
     plan produces the same plan through both doors, the same answer as the oracle for the query it
     actually compiled, and a green sweep. The only thing standing between "the text means what

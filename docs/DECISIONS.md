@@ -33,7 +33,7 @@ associative and exact, so integers have no such conflict.
 count are maintained, and exactly one division is performed at emit time (S-31). Identical inputs
 through an identical single operation give identical bits in both implementations.
 
-**Cost, stated plainly.** Current cannot represent non-integer measures at all today. That is a
+**Cost, stated plainly.** Schweep cannot represent non-integer measures at all today. That is a
 real limitation for real workloads and it is named in the README, not hidden. See Q-1.
 
 ### D-11 · Arithmetic errors are errors — not wraps, not saturation, not NULL
@@ -62,43 +62,43 @@ carry negative weights freely — that is I-5 and it is the point.
 
 *Sprint: C0. Preserves: I-2, D-7. Recorded in `docs/SEMANTICS.md` S-7.*
 
-SQL leaves null ordering implementation-defined and offers `NULLS FIRST`/`NULLS LAST`. Current
+SQL leaves null ordering implementation-defined and offers `NULLS FIRST`/`NULLS LAST`. Schweep
 fixes one rule — nulls before all non-null values — and provides no modifier, so there is nothing
 for two implementations to disagree about. Strings order byte-wise over their UTF-8 encoding, with
 no collation support in v1.
 
-### D-14 · A neutral `current-plan` crate holds the logical plan, the binder, and the scalar expression library
+### D-14 · A neutral `schweep-plan` crate holds the logical plan, the binder, and the scalar expression library
 
 *A deviation from the §5 crate map, recorded before the code moved.*
 
 *Sprint: C1 (pre-work). Preserves: I-1, I-6. Supersedes: nothing in §4; **extends the crate map in
 `ARCHITECTURE.md` §5**.*
 
-**What changes.** A new crate `crates/current-plan/` is added to the workspace, holding three
-things that were in `current-oracle`:
+**What changes.** A new crate `crates/schweep-plan/` is added to the workspace, holding three
+things that were in `schweep-oracle`:
 
 - the **logical plan IR** — `Query`, `Source`, `Expr`, `BinOp`, `AggFunc`, `GroupBy`, `Named`;
 - the **binder** — scope rules, type checking, and the named refusals (S-10, S-12, S-19, S-27);
 - the **scalar expression library** — three-valued evaluation (S-13…S-22).
 
-`current-zset` additionally gains `EpochDeltas`, the per-table bundle of input deltas, replacing
-two private copies (one in `current-oracle`, one in the differential harness).
+`schweep-zset` additionally gains `EpochDeltas`, the per-table bundle of input deltas, replacing
+two private copies (one in `schweep-oracle`, one in the differential harness).
 
 **Why the crate map needed extending.** §5 lists ten crates and none of them is a home for a
 logical plan that *both* the oracle and the engine can read. From C1 there are two implementations
 of the query surface, and every option other than a neutral crate is worse:
 
-- `current-circuit` depending on `current-oracle` inverts the relationship the oracle exists to
+- `schweep-circuit` depending on `schweep-oracle` inverts the relationship the oracle exists to
   have. The oracle is the arbiter (§5.1); an engine that imports it can inherit its bugs, and I-1
   stops being a comparison between two things.
 - Duplicating the plan IR in the engine means two spellings of one query shape, which must then be
   kept in step by hand. I-6 ("SQL and the typed API compile to the same circuit plan") is a claim
   about there being *one* plan type; two would make it unprovable.
-- Putting the plan in `current-zset` breaks that crate's cohesion. It is the data layer — "Z-set
+- Putting the plan in `schweep-zset` breaks that crate's cohesion. It is the data layer — "Z-set
   batches over Arrow; weight algebra; consolidation" — and a query IR is not data.
 
-`EpochDeltas` goes to `current-zset` for the opposite reason: it *is* data, it is the delta
-representation named in §1, and every crate already depends on that crate. `current-log` (§5.4) is
+`EpochDeltas` goes to `schweep-zset` for the opposite reason: it *is* data, it is the delta
+representation named in §1, and every crate already depends on that crate. `schweep-log` (§5.4) is
 its eventual home for the *write path*, but that is C4 and the type is needed now.
 
 **Why the binder moves with the plan.** The scoping rules (S-10 qualified before a GROUP BY,
@@ -117,7 +117,7 @@ The cost is real and is stated rather than glossed: **a bug inside shared code p
 wrong answer on both sides, and the differential harness cannot see it.** Three things bound that
 risk, and none of them is "we were careful":
 
-1. `current-plan` carries the S-rule unit tests that were in the oracle — the Kleene truth tables,
+1. `schweep-plan` carries the S-rule unit tests that were in the oracle — the Kleene truth tables,
    checked arithmetic, CASE short-circuiting, null comparison. They pin the library against
    `docs/SEMANTICS.md` directly, not against another implementation.
 2. What C1 is actually hunting is *incrementality* bugs — maintaining an answer from deltas versus
@@ -125,23 +125,23 @@ risk, and none of them is "we were careful":
 3. §6 C5's parenthesis is the standing warning: shared code can still be *called* differently, and
    the harness does test that.
 
-**Where this lands in C5.** `current-sql` becomes "sqlparser AST → a SQL-specific binder →
-`current_plan::Query` → the incrementalizer". Both doors — SQL text and the typed API — produce
-the same `current_plan::Query`, which is what I-6 needs in order to be checkable at all.
+**Where this lands in C5.** `schweep-sql` becomes "sqlparser AST → a SQL-specific binder →
+`schweep_plan::Query` → the incrementalizer". Both doors — SQL text and the typed API — produce
+the same `schweep_plan::Query`, which is what I-6 needs in order to be checkable at all.
 
 ### D-15 · `StateBackend` keys are `Vec<Value>` ordered by S-7, not bytes
 
 *Sprint: C2. Preserves: I-2, I-9. Realises `ARCHITECTURE.md` §5.5; the trait is frozen at C4 exit.*
 
 §5.5 calls for "ordered KV with range scans, atomic multi-key write batches, and named snapshots".
-The obvious reading of "KV" is `Vec<u8>` → `Vec<u8>`. Current's `StateBackend` instead uses
+The obvious reading of "KV" is `Vec<u8>` → `Vec<u8>`. Schweep's `StateBackend` instead uses
 `Vec<Value>` keys ordered by the total order on values (S-7), with `i64` values.
 
 **Why.** An order-preserving byte encoding of a row is a real piece of engineering — sign-aware
 integer encoding, length-prefixed strings, null ordering — and getting it subtly wrong produces a
 backend whose scans return the right rows in the wrong order. That is a *storage* problem, and D-5
-and §2 both say storage is the boring part that lives behind the trait: "`current-log` and
-`current-state` must sit behind traits rather than being called concretely from operators." Putting
+and §2 both say storage is the boring part that lives behind the trait: "`schweep-log` and
+`schweep-state` must sit behind traits rather than being called concretely from operators." Putting
 the encoding in the *interface* would push a storage concern into every operator, and would make
 C2's join correctness depend on a serialiser written the same week.
 
@@ -287,7 +287,7 @@ What that costs, stated rather than glossed: **the freeze is validated by one im
 two.** The whole point of freezing a trait at C4 is that a second backend can then slot in without
 touching operators, and that claim is now argued from the interface rather than demonstrated by a
 second implementation. The order-preserving byte codec `RocksBackend` will need
-(`current_state::codec`) *was* built and is tested — byte order equals value order over a seeded
+(`schweep_state::codec`) *was* built and is tested — byte order equals value order over a seeded
 sweep — so the piece most likely to be got wrong is done. But `RocksBackend` itself is outstanding
 work, it is named in `docs/PROGRESS.md` as such, and C4's gate does not depend on it: every I-4 and
 I-7 claim is proven over `MemBackend` plus real checkpoint files on a real filesystem.
@@ -325,7 +325,7 @@ D-5 named "embedded LSM (RocksDB via `rust-rocksdb`)" as the first `StateBackend
 pure-Rust embedded B-tree store.**
 
 **The trigger.** Two sprints tried to build `rust-rocksdb` and could not, for reasons that are about
-the toolchain rather than about Current:
+the toolchain rather than about Schweep:
 
 - `librocksdb-sys` compiles RocksDB's C++ from source. A debug build produced over 2.1 GiB of object
   files and exhausted the development machine's free disk, which is the failure that actually stopped
@@ -333,7 +333,7 @@ the toolchain rather than about Current:
 - It also requires `bindgen`, hence `libclang` — a second toolchain dependency, and one whose failure
   mode is obscure (see the D-18 correction below).
 
-Neither is a Current problem, and both are permanent costs paid by every contributor and every CI
+Neither is a Schweep problem, and both are permanent costs paid by every contributor and every CI
 runner. D-5 itself says the backend "is an optimization with a known interface, not a research
 problem" — so a dependency that makes the *build* a research problem is the wrong trade.
 
@@ -395,6 +395,59 @@ inputs, without advancing the epoch. The aggregate records that it has emitted, 
 happens exactly once and survives a checkpoint like any other state (C4). One extra state entry, and
 one extra step in circuit construction, in exchange for an answer that matches what the query means.
 
+### D-21 · The project is renamed **Schweep**; "Current" is encumbered
+
+*Recorded: 2026-08-11, between C8 and C9. Preserves: nothing technical — this is a naming decision, and
+it touches no invariant. Trigger: MutinyDB's **MD-4** name sweep. MutinyDB records the resolution on its
+own track in MD-4's addendum; this record is Schweep's, and the two are deliberately separate documents
+because the projects are separate.*
+
+**The trigger.** MD-4's sweep was run for MutinyDB and swept the sibling names with it. It found
+"Current" **encumbered on three independent axes**, any one of which would have been enough:
+
+| Axis | Finding |
+| --- | --- |
+| Trademark | Finco holds class-9 registrations **on the word itself** — the class that covers software |
+| Category collision | Confluent's **Current** conference owns the term inside the data-infrastructure category, which is precisely this project's category |
+| Namespace | the `current` crates.io name is taken |
+
+A name that is trademarked in its own class, owned as an event brand by a large vendor in the same
+category, and unavailable in the language's package registry is not a name with an obstacle. It is three
+names' worth of obstacle wearing one word.
+
+**The sweep history, so nobody repeats it.** Candidates considered and why each was set aside:
+
+| Candidate | Disposition |
+| --- | --- |
+| **Weft** | Rejected. `WeaveMindAI/weft` is a 1,824-star Rust AI-orchestration language — same language, adjacent field, real users. The crate and the npm name are taken |
+| Heddle, Artesian, Seiche, Millrace, Freshet, Weir, Oxbow | Occupied |
+| **Thalweg** | **Viable, and passed over.** Recorded because "we never found another one" would be false: we did, and chose otherwise |
+| **Schweep** | **Adopted** |
+
+**Why Schweep.** It is clear on every axis the sweep checks:
+
+- `schweep` is free on **crates.io**, **npm**, and **PyPI**;
+- the **GitHub org** is free;
+- there is **no software product and no trademark signal** — five zero-star hobby repositories, which
+  makes it *unclaimed, not unheard-of*. A word with literally no prior use tends to be a word nobody
+  can spell after hearing it once; a word with five abandoned repositories has been said aloud and
+  claimed by nobody.
+
+**`schweep.com` is registered by a third party.** Recorded here, plainly, so that nobody plans a launch
+around acquiring it. It is not blocking — a package name, an org, and a clear trademark field are what a
+library needs — but it is a fact about the name and it belongs in the record rather than in a surprise.
+
+**What does not change.** The tagline **"every answer, current"** stays. It was always the adjective, and
+with the project no longer named Current it reads as the adjective and nothing else — the sentence gets
+*less* ambiguous, not more. Every invariant, every decision D-1…D-20, every semantic rule and every gate
+is untouched: this record renames a product, not a design.
+
+**What does change, mechanically.** The repository (`Current` → `schweep`, with GitHub redirecting the
+old URLs), the crate names (`current-*` → `schweep-*`, `schweepd` → `schweepd`), and the product name in
+prose across `ARCHITECTURE.md`, `CLAUDE.md`, `README.md`, and the `docs/`. Nothing is published, so this
+is a grep, not a migration — and the absence of a migration is exactly why it happens now rather than
+after v0.1.
+
 ---
 
 ## Open questions
@@ -404,7 +457,7 @@ one extra step in circuit construction, in exchange for an answer that matches w
 *Raised: C0 (D-10). Must be settled by: before any workload requiring non-integer measures — and
 before v0.1 is described as generally useful. Not a C0 blocker.*
 
-`Float64` is excluded from the type system for the reason in D-10, which leaves Current unable to
+`Float64` is excluded from the type system for the reason in D-10, which leaves Schweep unable to
 express prices, rates, or ratios. The honest answer is fixed-point decimal arithmetic
 (`Decimal128` with a declared scale, as Arrow supports): exact, associative, and therefore
 compatible with I-1. What must be decided: the scale/precision model, rounding on division, and
@@ -472,7 +525,7 @@ C1 does not decide it, and keeps the gate away from it: the scenario generator e
 by non-zero literals over a value domain far too small to overflow, so rung-1 expressions cannot
 raise, and the gate asserts that zero scenarios produced an error rather than trusting that
 property to stay true. The behaviour that does exist is pinned by
-`an_evaluation_error_aborts_the_step_without_advancing_the_epoch` in `current-circuit`: a failed
+`an_evaluation_error_aborts_the_step_without_advancing_the_epoch` in `schweep-circuit`: a failed
 step leaves the epoch and the result store exactly where they were, so nothing is half-applied
 (I-3), whatever the eventual policy turns out to be.
 
@@ -482,7 +535,7 @@ step leaves the epoch and the result store exactly where they were, so nothing i
 
 Aggregation with no group keys is refused at rungs 1–3 (`EmptyGroupKeys`). The edge case that must
 be decided first: over an *empty* input, standard SQL returns exactly one row (`COUNT(*) = 0`),
-whereas Current's rule that a group exists only if its total weight is positive (S-29) would
+whereas Schweep's rule that a group exists only if its total weight is positive (S-29) would
 produce no row at all. Both are defensible. The tension is that the SQL answer requires the
 "empty group" to be conjured from nothing, which an incremental engine must maintain as a special
 initial state — a real implementation cost that should be paid knowingly, if it is paid.

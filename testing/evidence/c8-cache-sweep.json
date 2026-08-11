@@ -1,7 +1,7 @@
 {
   "$comment": [
     "C8 · how redb's page cache steers resident memory (I-10).",
-    "Regenerate: cargo run --release -p current-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json",
+    "Regenerate: cargo run --release -p schweep-soak --bin cache-sweep > testing/evidence/c8-cache-sweep.json",
     "MACHINE-DEPENDENT: resident memory is an allocator and kernel figure, so no test",
     "recomputes this. The deterministic half of the C8 measurements is c8-state-costs.json,",
     "which IS recomputed and compared by testing/differential/tests/evidence.rs.",

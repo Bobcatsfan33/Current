@@ -1,13 +1,13 @@
-# Current
+# Schweep
 
-[![CI](https://github.com/Bobcatsfan33/Current/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Bobcatsfan33/Current/actions/workflows/ci.yml)
+[![CI](https://github.com/Bobcatsfan33/schweep/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Bobcatsfan33/schweep/actions/workflows/ci.yml)
 
 **The incremental-first query engine.** Every major database of the last two decades —
 ClickHouse, Snowflake, Elasticsearch, MongoDB, Postgres — shares one assumption: a query is a
 one-shot program. You ask; the engine reads the data, computes the answer, returns it, and
 forgets everything. Ask again after three rows changed and it recomputes everything from
-scratch. The cost of a question is O(data), every time. Current inverts the assumption: a query
-is a *standing computation*. The first time a query is asked, Current compiles it into a
+scratch. The cost of a question is O(data), every time. Schweep inverts the assumption: a query
+is a *standing computation*. The first time a query is asked, Schweep compiles it into a
 dataflow circuit and runs the data through it once. From then on the circuit stays alive: every
 batch of changes (a *delta*) flows through it, and the circuit updates its answer incrementally.
 The cost of keeping an answer correct is O(change), and the cost of reading an answer is a
@@ -16,12 +16,12 @@ dataset) and then torn down — same machinery, one code path.
 
 **The one-sentence pitch:** every answer, current.
 
-Current is the compute plane of a future database called MutinyDB, but it is a **standalone
+Schweep is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
 ## Status: Sprint C8 complete (with the gaps named below)
 
-Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
+Schweep is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
 
 **What exists today:** the whole query surface `docs/SEMANTICS.md` defines, reachable from **SQL
@@ -35,7 +35,7 @@ way over the 2,028 of those scenarios that have a SQL form, and I-6 asserts that
 structurally identical plans with identical execution counters.
 
 Anything SQL has that this dialect does not is refused **by name**: 60 such constructs are in
-`crates/current-sql/tests/dialect.rs`, each with the message that must name it.
+`crates/schweep-sql/tests/dialect.rs`, each with the message that must name it.
 
 **Many queries, one dataflow.** Standing queries that overlap share the circuitry they have in
 common: register two queries with the same `WHERE` and the filter is stepped once per epoch, not
@@ -67,7 +67,7 @@ against the backends themselves rather than trusting it.
 
 **What does not exist yet:** no server (C9). Nothing here is usable as a database today, and nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
-group's whole value multiset, and `current-oracle` is *deliberately* slow, because its job is to be
+group's whole value multiset, and `schweep-oracle` is *deliberately* slow, because its job is to be
 obviously correct, not quick.
 
 **Numbers we publish:** the memory figures above, and only those. Each traces to a committed artifact in
@@ -92,7 +92,7 @@ Contributors start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and
 
 ## The theory is not ours
 
-Current implements the **DBSP** model of incremental computation (Budiu, McSherry, Ryzhyk,
+Schweep implements the **DBSP** model of incremental computation (Budiu, McSherry, Ryzhyk,
 Tannen — VLDB 2023), in which every relational operator has an incremental form that consumes
 deltas and emits deltas, and any composition of them is itself incremental. We did not discover
 the theory. The work here is building a general-purpose, enterprise-grade, evidence-obsessed
@@ -102,24 +102,24 @@ from scratch, every time, in CI.
 ## Repository layout
 
 ```
-crates/current-zset/     Z-set batches over Arrow; weight algebra; consolidation
-crates/current-plan/     the logical plan, the binder, the scalar expression library
-crates/current-oracle/   the naive reference engine — the spec, and the arbiter of disputes
-crates/current-ops/      circuit operators: filter, project, equi-join, aggregate, distinct
-crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
-crates/current-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
-crates/current-memo/     canonicalization, structural hashing, the standing-query registry
-crates/current-batch/    one-shot queries, Parquet snapshots, log compaction, bootstrap
+crates/schweep-zset/     Z-set batches over Arrow; weight algebra; consolidation
+crates/schweep-plan/     the logical plan, the binder, the scalar expression library
+crates/schweep-oracle/   the naive reference engine — the spec, and the arbiter of disputes
+crates/schweep-ops/      circuit operators: filter, project, equi-join, aggregate, distinct
+crates/schweep-circuit/  the circuit: DAG wiring, epochs, step scheduler, result stores
+crates/schweep-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
+crates/schweep-memo/     canonicalization, structural hashing, the standing-query registry
+crates/schweep-batch/    one-shot queries, Parquet snapshots, log compaction, bootstrap
 testing/soak/            the soak harness: RSS sampled across a run, at a fixed memory ceiling
-crates/current-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
-crates/current-log/      the input log: a directory of files, epoch sealing, exactly-once admission
+crates/schweep-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
+crates/schweep-log/      the input log: a directory of files, epoch sealing, exactly-once admission
 testing/crash/           the crash harness: named seams, byte faults, recovery vs an uncrashed twin
 testing/differential/    the oracle harness: seeded scenarios, engine vs oracle, every epoch
 testing/evidence/        the ledger, and the artifacts its entries cite
 docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 ```
 
-`current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
+`schweep-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
 **Known limitations, before you find them:** state can **spill** but it cannot be **checkpointed** at

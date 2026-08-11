@@ -1,5 +1,5 @@
 {
-  "$comment": "Receipt for the scenario generator's tuned constants (I-10). Regenerate with: cargo run -p current-differential --bin generator-coverage > testing/evidence/c0-generator-coverage.json. A deterministic function of the seed range: no timing, no threads, machine-independent.",
+  "$comment": "Receipt for the scenario generator's tuned constants (I-10). Regenerate with: cargo run -p schweep-differential --bin generator-coverage > testing/evidence/c0-generator-coverage.json. A deterministic function of the seed range: no timing, no threads, machine-independent.",
   "seeds": 1000,
   "scenarios": 1000,
   "epochs": 4568,

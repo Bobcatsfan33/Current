@@ -8,19 +8,19 @@
 //! 2. *"I-6 gate: typed-API and SQL doors produce identical plans (structural hash equality) and
 //!    identical counters on the gate suite"*: both, on every scenario that has a SQL form.
 //! 3. *"every refusal names its construct"*: asserted over a table of out-of-dialect SQL in
-//!    `current-sql/tests/dialect.rs`, and re-asserted here for the refusals the fuzzer can reach.
+//!    `schweep-sql/tests/dialect.rs`, and re-asserted here for the refusals the fuzzer can reach.
 //!
 //! ## The population, and what is honest about it
 //!
 //! The SQL door is driven by rendering the *existing* typed population back to SQL
-//! ([`current_differential::sql_form`]). Some typed queries have no SQL form in this dialect — a
+//! ([`schweep_differential::sql_form`]). Some typed queries have no SQL form in this dialect — a
 //! projection over a GROUP BY is the big one, because SQL takes a group key's output name from the
 //! select list. Those are **counted by reason and printed**, and the counts are asserted, so the day
 //! coverage shrinks the gate says so instead of staying green.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use current_differential::{
+use schweep_differential::{
     sql_form, sweep_matching, CircuitEngine, EngineUnderTest, Family, NoSqlForm, OracleEngine,
     Scenario, SqlEngine,
 };
@@ -262,7 +262,7 @@ fn i6_the_two_doors_execute_identical_counters() {
 
 /// The SQL door is not a second dialect: what it refuses, it refuses **by name** (S-12, S-35).
 ///
-/// The exhaustive table lives in `current-sql/tests/dialect.rs`. This is the subset the gate cares
+/// The exhaustive table lives in `schweep-sql/tests/dialect.rs`. This is the subset the gate cares
 /// about — the refusals a person writing SQL against a *generated* schema would actually hit.
 #[test]
 fn the_refusals_the_fuzzer_can_reach_name_their_constructs() {
@@ -270,7 +270,7 @@ fn the_refusals_the_fuzzer_can_reach_name_their_constructs() {
         Ok(scenario) => scenario,
         Err(e) => panic!("seed 7 failed to generate: {e}"),
     };
-    let catalog: current_plan::bind::Catalog = scenario.tables.iter().cloned().collect();
+    let catalog: schweep_plan::bind::Catalog = scenario.tables.iter().cloned().collect();
     let table = match scenario.tables.first() {
         Some((name, _)) => name.clone(),
         None => panic!("the generator produced no tables"),
@@ -295,7 +295,7 @@ fn the_refusals_the_fuzzer_can_reach_name_their_constructs() {
             "ORDER BY",
         ),
     ] {
-        match current_sql::compile(&sql, &catalog) {
+        match schweep_sql::compile(&sql, &catalog) {
             Ok(_) => panic!("{sql} was accepted"),
             Err(error) => {
                 let message = error.to_string();

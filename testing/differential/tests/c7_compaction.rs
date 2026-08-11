@@ -26,13 +26,13 @@
 
 use std::collections::BTreeMap;
 
-use current_batch::{compact, hydrate, oneshot, snapshot};
-use current_differential::{sweep_matching, OneShotEngine, OracleEngine, Scenario};
-use current_log::{Ack, FaultInjector, Log, SyncPolicy};
-use current_memo::{Memo, Sharing};
-use current_oracle::Oracle;
-use current_plan::bind::Catalog;
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_batch::{compact, hydrate, oneshot, snapshot};
+use schweep_differential::{sweep_matching, OneShotEngine, OracleEngine, Scenario};
+use schweep_log::{Ack, FaultInjector, Log, SyncPolicy};
+use schweep_memo::{Memo, Sharing};
+use schweep_oracle::Oracle;
+use schweep_plan::bind::Catalog;
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 // ---- the fixture: a log, a memo, and a history worth compacting --------------------------------
 
@@ -129,7 +129,7 @@ const QUERIES: &[&str] = &[
 ];
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("current-c7-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("schweep-c7-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -169,7 +169,7 @@ fn oracle_answers() -> Vec<String> {
     QUERIES
         .iter()
         .map(|sql| {
-            let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+            let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
             oracle
                 .canonical_answer_at(&query, oracle.sealed_epoch())
                 .unwrap()
@@ -313,7 +313,7 @@ fn answers_are_byte_identical_across_a_compaction() {
 
     // 3 · a one-shot over the compacted log.
     for (sql, want) in QUERIES.iter().zip(&expected) {
-        let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+        let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
         assert_eq!(
             &oneshot::answer_over_log(&log, &catalog(), &query)
                 .unwrap()
@@ -425,7 +425,7 @@ fn four_materializations_of_one_history_agree() {
             QUERIES
                 .iter()
                 .map(|sql| {
-                    let query = current_sql::bind_sql(sql, &catalog()).unwrap().query;
+                    let query = schweep_sql::bind_sql(sql, &catalog()).unwrap().query;
                     oneshot::answer_over_log(&log, &catalog(), &query)
                         .unwrap()
                         .render()
@@ -579,7 +579,7 @@ fn compaction_refuses_what_it_cannot_anchor() {
                 &mut FaultInjector::inert(),
                 SyncPolicy::Deferred
             ),
-            Err(current_batch::BatchError::NoCheckpointToAnchorTo)
+            Err(schweep_batch::BatchError::NoCheckpointToAnchorTo)
         ),
         "P1: no published checkpoint, nothing to anchor to"
     );
@@ -629,9 +629,9 @@ fn a_one_shot_and_a_standing_query_agree() {
         let catalog: Catalog = scenario.tables.iter().cloned().collect();
 
         let mut memo = Memo::with_sharing(catalog.clone(), Sharing::On).unwrap();
-        let plan = current_sql::incrementalize_typed(&scenario.query, &catalog).unwrap();
+        let plan = schweep_sql::incrementalize_typed(&scenario.query, &catalog).unwrap();
         let handle = memo
-            .register(&plan, current_memo::Admission::bounded())
+            .register(&plan, schweep_memo::Admission::bounded())
             .unwrap();
 
         let mut accumulated = EpochDeltas::new();

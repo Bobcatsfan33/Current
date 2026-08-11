@@ -24,14 +24,14 @@
     clippy::indexing_slicing
 )]
 
-use current_differential::{CircuitEngine, EngineUnderTest, OracleEngine, Scenario};
-use current_memo::{Admission, CostModel, Memo, Sharing};
-use current_plan::bind::Catalog;
-use current_state::{BackendFactory, RedbFactory};
-use current_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
+use schweep_differential::{CircuitEngine, EngineUnderTest, OracleEngine, Scenario};
+use schweep_memo::{Admission, CostModel, Memo, Sharing};
+use schweep_plan::bind::Catalog;
+use schweep_state::{BackendFactory, RedbFactory};
+use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("current-c8-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("schweep-c8-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -353,7 +353,7 @@ fn a_memo_on_redb_answers_as_a_memo_in_memory_does() {
     .unwrap();
     let mut handles = Vec::new();
     for sql in queries {
-        let plan = current_sql::compile(sql, &catalog()).unwrap();
+        let plan = schweep_sql::compile(sql, &catalog()).unwrap();
         handles.push((
             memory.register(&plan, Admission::bounded()).unwrap(),
             spilled.register(&plan, Admission::bounded()).unwrap(),
@@ -392,12 +392,12 @@ fn every_operator_gets_its_own_labelled_file() {
     let root = scratch("labels");
     let spill = root.join("state");
     let mut factory = RedbFactory::new(&spill);
-    let plan = current_sql::compile(
+    let plan = schweep_sql::compile(
         "SELECT t.k AS k, COUNT(*) AS c FROM t GROUP BY t.k",
         &catalog(),
     )
     .unwrap();
-    let _circuit = current_sql::instantiate_with(&plan, &mut factory).unwrap();
+    let _circuit = schweep_sql::instantiate_with(&plan, &mut factory).unwrap();
 
     let handed = factory.handed_out();
     assert_eq!(handed.len(), 1, "one aggregate, one store");
@@ -418,8 +418,8 @@ fn every_operator_gets_its_own_labelled_file() {
     let two = Schema::new(vec![Field::new("id", DataType::Int64, false)]).unwrap();
     let catalog = Catalog::from([("a".to_owned(), two.clone()), ("b".to_owned(), two)]);
     let plan =
-        current_sql::compile("SELECT a.id AS x FROM a JOIN b ON a.id = b.id", &catalog).unwrap();
-    let _circuit = current_sql::instantiate_with(&plan, &mut factory).unwrap();
+        schweep_sql::compile("SELECT a.id AS x FROM a JOIN b ON a.id = b.id", &catalog).unwrap();
+    let _circuit = schweep_sql::instantiate_with(&plan, &mut factory).unwrap();
     let labels: Vec<String> = factory
         .handed_out()
         .into_iter()
