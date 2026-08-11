@@ -56,9 +56,10 @@ answers to keep right.
 
 **Operator state does not have to fit in memory.** It lives in redb files, one per operator, behind the
 `StateBackend` trait frozen at C4 — and the freeze is now final, because a second implementation slotted
-in without changing a method of it. In CI, a job runs the engine under a **fixed 128 MiB cgroup ceiling**
-with operator state ten times that, sampling resident memory throughout; measured locally, 1.08 GB of
-state runs in a 38 MB process. The same scenarios on either backend give byte-identical answers and
+in without changing a method of it. In CI, a job runs the engine under a **fixed 128 MiB cgroup ceiling**,
+sampling resident memory throughout: **2.16 GB of operator state — sixteen times the ceiling — in a
+process whose resident memory peaks at 14.3 MiB**, a ratio of 144 to 1, with memory growing 0.7% while
+state grew 1,500%. The same scenarios on either backend give byte-identical answers and
 byte-identical logical state.
 
 `EXPLAIN STATE` reports what every operator of every query is holding, and a gate checks the report

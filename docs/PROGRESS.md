@@ -1382,10 +1382,10 @@ transaction lands inside an existing seam pair, and recovery replaces its conten
 
 | Gate condition (§6 C8) | Proven by | Result |
 | --- | --- | --- |
-| A scenario with operator state 10× RAM completes with flat memory | `operator_state_many_times_the_ceiling_completes_with_flat_memory`, run by the `state-ceiling` CI job under `systemd-run -p MemoryMax=128M` | state **10× the ceiling**; RSS peaks at 39 MB and *falls* 4.7% while state grows 300%; locally, 1.08 GB of state against a 38 MB peak — a **28:1 ratio** |
-| RSS sampled across the run, leak fails the job | same test | 157 samples; shape asserted after a stated warm-up, **and** an absolute budget, because the shape alone failed to catch a leak (below) |
+| A scenario with operator state 10× RAM completes with flat memory | `operator_state_many_times_the_ceiling_completes_with_flat_memory`, run by the `state-ceiling` CI job under `systemd-run -p MemoryMax=128M` | **measured in CI, under the real cgroup:** ceiling read back as 134,217,728 bytes; **2.16 GB of operator state — 16× it**; **peak RSS 14.3 MiB, a 144:1 ratio**; RSS +0.7% while state grew +1,500%; 626 samples in 24 s |
+| RSS sampled across the run, leak fails the job | same test | **626 samples in CI** (578 after warm-up); shape asserted after a stated warm-up, **and** an absolute budget, because the shape alone failed to catch a leak (below) |
 | The ceiling is fixed in the job, not inherited | the job applies it; the test **reads it back** from the cgroup and `CURRENT_CEILING_REQUIRED=1` makes its absence a failure | a ceiling gate on a machine with free memory proves nothing, so it refuses to claim the gate without one |
-| `EXPLAIN STATE` numbers reconcile with actual backend usage | `explain_state_reconciles_with_what_the_backend_actually_occupies`, six rounds as state grows | entries checked against an independent count, bytes against a measured floor and a presence condition |
+| `EXPLAIN STATE` numbers reconcile with actual backend usage | `explain_state_reconciles_with_what_the_backend_actually_occupies`, six rounds as state grows; and again inside the ceiling gate | entries checked against an independent count, bytes against a measured floor and a presence condition. In CI at 2.16 GB: **844,050 entries reported / 844,050 held**, at 2,554 bytes per entry — an order of magnitude above the 67…205 measured for ordinary keys, which is exactly why no byte *ceiling* is claimed |
 | The C4 gates on the backend that ships | `crash_and_recover_on_redb` | **600 cycles, 283 faults, 26 of 26 named seams fired**, twin comparison and I-4 re-offer unchanged |
 | Backend invariance | `the_two_backends_agree_on_every_answer_and_every_logical_state` | **1,200 scenarios**, answers *and* logical state fingerprints identical; `the_spilled_engine_agrees_with_the_oracle` adds 800 against the oracle |
 | Admission control at registration for undeclarable bounds (I-9) | delivered in C6 (`Admission`), unchanged here | — |
@@ -1487,8 +1487,10 @@ instrument rather than a looser threshold. That is the whole reason for applying
   that satisfies all three constraints at once. A generated population under a ceiling would be better;
   the differential gates run the population *without* one.
 - **Still no real `kill -9`**, and no compaction policy. Both named in C7, both still true.
-- **The `state-ceiling` job's first CI run is this commit's.** Locally it runs in smoke mode, since a
-  developer machine has no cgroup; the ceiling assertion has only ever been exercised by the job.
+- **The ceiling gate's numbers come from CI, and the local ones are a smoke test.** A developer machine
+  has no cgroup, so locally the gate declines to claim anything and holds itself to a measured RSS budget
+  instead. The two environments differ by more than noise — 14.3 MiB peak on the Linux runner against
+  38 MB on macOS, at four times the state — so any figure quoted here says which one it came from.
 
 ### What C9 needs
 
