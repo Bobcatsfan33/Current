@@ -12,10 +12,15 @@
     "  1. through_a_log — streaming the history out of schweep_log::Log peaked at 342 MB, because a",
     "     Log holds every sealed batch resident. The catch-up was flat; the feeder was not.",
     "  2. one_binary_per_measurement — the gate first shared a binary with its correctness test and",
+    "  1. through_a_log — streaming the history out of schweep_log::Log peaked at 342 MB, because a",
+    "     Log holds every sealed batch resident. The catch-up was flat; the feeder was not.",
+    "  2. one_binary_per_measurement — the gate first shared a binary with its correctness test and",
     "     failed the full-workspace run at 123.9 MB against a 96 MiB budget, having peaked at 54.6 MB",
     "     alone. Resident memory is a property of the process.",
     "  3. per_pass_residue — the catch-up's resident memory climbs monotonically, and it is per PASS",
-    "     rather than per byte of state. That is why the gate asserts a coefficient and not flatness."
+    "     rather than per byte of state. That is why the gate asserts a coefficient and not flatness.",
+    "  4. the_page_cache_is_charged_to_the_cgroup — see below. The gate was OOM-killed writing its own",
+    "     fixture, on the run after the one that passed."
   ],
   "shape": {
     "sql": "SELECT a.id AS id FROM a JOIN b ON a.id = b.id WHERE a.id < 100",
@@ -168,5 +173,13 @@
     "wall_clock_seconds": 26.68,
     "verdict": "PASSED under a real 128 MiB ceiling: 384 MB of accumulated input streamed and 1.08 GB of state built, in a process whose resident memory peaked at 14.7 MB — 26:1 against the input and 73:1 against the state",
     "what_the_two_platforms_say_about_the_per_pass_residue": "0.03% of the input on Linux against 0% to 3.1% on macOS. Both are small and both are positive; two orders of magnitude between them is evidence that the residue is the allocator's page-return policy rather than anything redb writes, which is the first real discrimination between the two candidates named above. It is still not proof, and C10 owns it."
+  },
+  "the_page_cache_is_charged_to_the_cgroup": {
+    "$comment": "A memory cgroup charges the page cache, and dirty pages are not reclaimable until writeback has cleaned them. Writing a 384 MB fixture inside the ceiling therefore reaches memory.max and the OOM killer fires — timing-dependent, so it passed one CI run and failed the next with exit code 137, having printed only its own header.",
+    "failing_run": 31523881483,
+    "exit_code": 137,
+    "engine_involvement": "none — the fixture had not finished being written when the process died",
+    "fix": "write_segment flushes and sync_data()s every epoch, bounding the dirty set at one epoch's frames (under a megabyte at this shape)",
+    "cost": "a few hundred fsyncs, fewer than the log itself performs for the same history"
   }
 }

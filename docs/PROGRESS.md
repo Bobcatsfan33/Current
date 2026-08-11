@@ -1639,7 +1639,7 @@ of reach here rather than assumed to be covered.
 | Two servers fed the same requests hold byte-identical state, counters and plans (I-2) | `two_servers_fed_the_same_requests_are_byte_identical` |
 | C9's deterministic measurements still describe the wire, and the ledger's values match the code | `the_c9_bounds_artifact_still_describes_the_wire` |
 
-### Five things the gates found
+### Six things the gates found
 
 1. **Recovery applied every input twice** (D-22 addendum). Found by the first restart test, before any
    crash gate existed. The redb store survived a restart and bootstrap hydrated on top of it.
@@ -1665,6 +1665,20 @@ of reach here rather than assumed to be covered.
    assertion finally fired and the failure message was read closely. Both are fixed, and both sites now
    state that the value is a fraction. **The lesson is about the print, not the threshold:** a number
    displayed in the wrong unit made a broken assertion look reasonable every time it passed.
+
+6. **A memory cgroup charges the page cache, so a test that writes its own fixture inside the ceiling must
+   sync as it goes.** The memo-ceiling job passed one CI run and was killed with **exit code 137** — the
+   cgroup's OOM killer — on the next, having got no further than printing its own header. Nothing about the
+   engine was involved: the fixture writes 384 MB of segment, and dirty pages cannot be reclaimed until
+   writeback has cleaned them, so dirtying faster than the kernel writes back reaches `memory.max` and the
+   killer fires. It is timing-dependent, which is why it passed once. `write_segment` now flushes and
+   `sync_data`s every epoch, bounding the dirty set at one epoch's frames. **A flake is a bug in the test or
+   a bug in the engine** — this one was the former, and finding out which took reading an exit code rather
+   than re-running.
+
+   The same move fixed a duplication the earlier split had created: the fixture now lives once, in
+   `testing/soak/tests/common/mod.rs`. It spent one commit in the crate's *library*, where clippy correctly
+   refused it — a fixture that panics belongs in test code (`CLAUDE.md` rule 1).
 
 ### What C9 does **not** prove
 

@@ -41,22 +41,19 @@
     clippy::indexing_slicing
 )]
 
-use std::io::{BufWriter, Write};
+use schweep_memo::Admission;
+mod common;
 
-use schweep_log::{Epochs, Record};
-use schweep_memo::{Admission, Memo, Sharing};
-use schweep_plan::bind::Catalog;
+use common::{catalog, directory_bytes, memo, sql, stream, write_segment, ANSWER_KEYS};
 use schweep_soak::{ceiling, Ceiling, Curve};
-use schweep_state::RedbFactory;
-use schweep_zset::{DataType, EpochDeltas, Field, Row, Schema, Value};
 
 /// How much bigger than the ceiling the *accumulated input* must be.
 ///
 /// Three, not C8's ten, and the difference is deliberate: C8's multiplier is about **state**, which redb
-/// spills, and ten times the ceiling is a statement about the spill working. This gate's claim is about
-/// the **input** a catch-up streams past, where the honest statement is "more than the process may hold" —
-/// three times establishes that, and thirty times would only establish that the test can write a bigger
-/// log. The multiplier is in the ledger with the rest of C9's constants.
+/// spills, and ten times the ceiling is a statement about the spill working. This gate's claim is about the
+/// **input** a catch-up streams past, where the honest statement is "more than the process may hold" — three
+/// times establishes that, and thirty times would only establish that the test can write a bigger file. The
+/// multiplier is in the ledger with the rest of C9's constants.
 const INPUT_MULTIPLIER: u64 = 3;
 
 /// The accumulated input the smoke run builds when no ceiling is in force.
@@ -65,134 +62,6 @@ const SMOKE_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 /// The resident budget the smoke run holds itself to. C8 measured this shape's clean peak at 38 MB and an
 /// injected leak's at 214 MB; 96 MiB sits between them, closer to the clean one.
 const SMOKE_RSS_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
-
-/// Rows per table per epoch, and the padding width — together these set how fast the log grows.
-const ROWS_PER_EPOCH: i64 = 750;
-const PADDING: usize = 480;
-
-/// Only ids below this reach the answer, so the *answer* stays small however large the input grows.
-const ANSWER_KEYS: i64 = 100;
-
-fn catalog() -> Catalog {
-    let table = || {
-        Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("pad", DataType::Utf8, false),
-        ])
-        .unwrap()
-    };
-    Catalog::from([("a".to_owned(), table()), ("b".to_owned(), table())])
-}
-
-fn row(id: i64) -> Row {
-    Row::new(vec![
-        Value::Int(id),
-        Value::Str(format!("{:width$}", id, width = PADDING)),
-    ])
-}
-
-/// The same shape C8 settled on: a join with near-unique keys behind a selective filter. Large state,
-/// large input, small answer.
-fn sql() -> String {
-    format!("SELECT a.id AS id FROM a JOIN b ON a.id = b.id WHERE a.id < {ANSWER_KEYS}")
-}
-
-fn directory_bytes(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total += directory_bytes(&entry.path());
-        } else {
-            total += meta.len();
-        }
-    }
-    total
-}
-
-/// Write a segment holding at least `target` bytes **and** at least `min_epochs` epochs. Returns the
-/// number of epochs sealed and the number of ids inserted.
-///
-/// **Written frame by frame rather than through [`schweep_log::Log`], and that is the point of the whole
-/// file.** A `Log` keeps every sealed batch resident, so filling a gigabyte of history through it costs a
-/// gigabyte of memory — the fixture would OOM under the very ceiling the gate applies, and the measurement
-/// would be of the fixture rather than of the catch-up. These are the log's own frames, written by the
-/// log's own encoder, so the reader below verifies exactly what the log would have written.
-///
-/// Two size conditions rather than one because the two phases want different things: the ceiling phase
-/// wants bytes, the correctness phase wants a *history* — enough epochs that a late registration is
-/// genuinely catching up over many of them rather than over one big one.
-fn write_segment(
-    path: &std::path::Path,
-    target: u64,
-    min_epochs: u64,
-    retract: bool,
-) -> (u64, i64) {
-    let file = std::fs::File::create(path).unwrap();
-    let mut out = BufWriter::with_capacity(64 * 1024, file);
-    let mut epochs = 0u64;
-    let mut ids = 0i64;
-    let mut written = 0u64;
-    loop {
-        for table in ["a", "b"] {
-            let mut entries = Vec::with_capacity(ROWS_PER_EPOCH as usize);
-            for index in 0..ROWS_PER_EPOCH {
-                entries.push((row(ids + index), 1i64));
-            }
-            // Retractions from day one, in the input the catch-up will stream (I-5). A catch-up that only
-            // ever saw insertions would not test the path a real history takes.
-            if retract && ids > ANSWER_KEYS + ROWS_PER_EPOCH {
-                for index in 0..(ROWS_PER_EPOCH / 10) {
-                    entries.push((row(ids - ROWS_PER_EPOCH + ANSWER_KEYS + index), -1));
-                }
-            }
-            let frame = schweep_log::record::frame(
-                &Record::Append {
-                    source_id: "filler".to_owned(),
-                    dedup_token: format!("{table}{epochs}"),
-                    table: table.to_owned(),
-                    entries,
-                }
-                .encode(),
-            );
-            written += frame.len() as u64;
-            out.write_all(&frame).unwrap();
-        }
-        epochs += 1;
-        let seal = schweep_log::record::frame(&Record::SealEpoch { epoch: epochs }.encode());
-        written += seal.len() as u64;
-        out.write_all(&seal).unwrap();
-        ids += ROWS_PER_EPOCH;
-        if written >= target && epochs >= min_epochs {
-            out.flush().unwrap();
-            out.into_inner().unwrap().sync_all().unwrap();
-            return (epochs, ids);
-        }
-        assert!(
-            epochs < 20_000,
-            "the segment is not growing toward {target} bytes; it stalled at {written}"
-        );
-    }
-}
-
-/// Every epoch in the segment, as the deltas a catch-up consumes — one epoch resident at a time.
-fn stream(segment: &std::path::Path) -> impl Iterator<Item = EpochDeltas> {
-    Epochs::open(segment).unwrap().map(|sealed| {
-        let sealed = sealed.unwrap();
-        let mut deltas = EpochDeltas::new();
-        for batch in sealed.batches {
-            deltas.extend(batch.table, batch.entries);
-        }
-        deltas
-    })
-}
-
-fn memo(dir: &std::path::Path) -> Memo {
-    Memo::without_input_cache(catalog(), Sharing::On, Box::new(RedbFactory::new(dir))).unwrap()
-}
 
 /// **The gate.** A late registration over an accumulated input larger than the ceiling.
 ///
