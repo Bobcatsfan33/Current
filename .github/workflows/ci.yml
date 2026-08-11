@@ -135,12 +135,51 @@ jobs:
       - name: The crash gate with every write fsynced
         run: cargo test -p current-crash --locked --test nightly_full_sync -- --ignored --nocapture
 
+  # The C8 ceiling gate: operator state ten times a **fixed** memory ceiling, completing with flat
+  # memory (§6 C8).
+  #
+  # The ceiling is applied here, by this job, and never inherited from the runner — that is §6 C8's
+  # pitfall in as many words. `systemd-run --scope -p MemoryMax=` puts the test in a cgroup with a hard
+  # limit; the test then *reads the limit back* from the cgroup and, with
+  # `CURRENT_CEILING_REQUIRED=1`, fails if there is none. So the job cannot silently degrade into a
+  # test that proves nothing on a machine with memory to spare: if the ceiling does not apply, the gate
+  # fails rather than passes.
+  state-ceiling:
+    name: state ceiling (cgroup, 10x)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Built outside the scope, because compiling under a 128 MiB ceiling would OOM the compiler
+      # rather than the test — and the claim is about the engine, not about rustc.
+      - name: Build the ceiling gate
+        run: cargo test --release -p current-soak --test c8_ceiling --locked --no-run
+
+      - name: Run it under a fixed 128 MiB ceiling
+        run: |
+          set -euo pipefail
+          binary=$(cargo test --release -p current-soak --test c8_ceiling --locked --no-run \
+            --message-format=json 2>/dev/null \
+            | python3 -c 'import json,sys
+for line in sys.stdin:
+    record = json.loads(line)
+    if record.get("profile", {}).get("test") and record.get("executable"):
+        print(record["executable"])' | tail -1)
+          echo "running $binary under MemoryMax=128M"
+          sudo systemd-run --scope --quiet \
+            -p MemoryMax=128M -p MemorySwapMax=0 \
+            -E CURRENT_CEILING_REQUIRED=1 \
+            -E TMPDIR="$RUNNER_TEMP" \
+            "$binary" --nocapture --test-threads=1
+
   # A single required check, so branch protection has one name to point at rather than four that
   # drift as jobs are added.
   ci:
     name: ci
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test, no-network]
+    needs: [fmt, clippy, test, no-network, state-ceiling]
     if: always()
     steps:
       - name: Fail if any job did not succeed

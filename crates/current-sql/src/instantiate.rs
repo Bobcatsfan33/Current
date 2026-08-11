@@ -16,15 +16,23 @@
 use current_circuit::{Circuit, CircuitBuilder, NodeId};
 use current_ops::Operator;
 use current_ops::{Aggregate, Distinct, Filter, Join, Project};
-use current_state::MemBackend;
+use current_state::{BackendFactory, MemFactory};
 
 use crate::circuit_plan::{CircuitNode, CircuitPlan};
 use crate::error::{Result, SqlError};
 
-/// Build a runnable circuit from a plan.
+/// Build a runnable circuit from a plan, with operator state in memory.
 pub fn instantiate(plan: &CircuitPlan) -> Result<Circuit> {
+    instantiate_with(plan, &mut MemFactory::new())
+}
+
+/// Build a runnable circuit from a plan, with operator state from `factory` (C8).
+///
+/// The backend choice enters here and nowhere else. Operators never name a store — see
+/// `current_state::factory` for why that is the arrangement the backend-invariance gate needs.
+pub fn instantiate_with(plan: &CircuitPlan, factory: &mut dyn BackendFactory) -> Result<Circuit> {
     let mut builder = CircuitBuilder::new();
-    let root = add(&mut builder, &plan.root)?;
+    let root = add(&mut builder, &plan.root, factory)?;
     let circuit = builder.build(root).map_err(circuit_error)?;
 
     // The same wiring check the incrementalizer makes, at the other end of the pipe. Cheap, and it
@@ -39,7 +47,11 @@ pub fn instantiate(plan: &CircuitPlan) -> Result<Circuit> {
     Ok(circuit)
 }
 
-fn add(builder: &mut CircuitBuilder, node: &CircuitNode) -> Result<NodeId> {
+fn add(
+    builder: &mut CircuitBuilder,
+    node: &CircuitNode,
+    factory: &mut dyn BackendFactory,
+) -> Result<NodeId> {
     match node {
         CircuitNode::Source {
             table,
@@ -51,14 +63,30 @@ fn add(builder: &mut CircuitBuilder, node: &CircuitNode) -> Result<NodeId> {
         _ => {
             let mut inputs = Vec::with_capacity(2);
             for child in children(node) {
-                inputs.push(add(builder, child)?);
+                inputs.push(add(builder, child, factory)?);
             }
-            let op = operator_for(node)?.ok_or(SqlError::PlanWiringMismatch {
-                emitted: "a source with children".to_owned(),
-                expected: "an operator".to_owned(),
-            })?;
+            // The label a backend is handed out under: the node it belongs to, and what it is. Unique
+            // within a circuit because node indices are, and readable because `EXPLAIN STATE` prints it.
+            let label = format!("n{}-{}", builder.node_count(), node_kind(node));
+            let op =
+                operator_for_with(node, &label, factory)?.ok_or(SqlError::PlanWiringMismatch {
+                    emitted: "a source with children".to_owned(),
+                    expected: "an operator".to_owned(),
+                })?;
             builder.add(op, inputs).map_err(circuit_error)
         }
+    }
+}
+
+/// The word that goes in a backend label.
+fn node_kind(node: &CircuitNode) -> &'static str {
+    match node {
+        CircuitNode::Source { .. } => "source",
+        CircuitNode::Filter { .. } => "filter",
+        CircuitNode::Project { .. } => "project",
+        CircuitNode::Join { .. } => "join",
+        CircuitNode::Aggregate { .. } => "aggregate",
+        CircuitNode::Distinct { .. } => "distinct",
     }
 }
 
@@ -87,6 +115,15 @@ pub fn children(node: &CircuitNode) -> Vec<&CircuitNode> {
 /// operator a node means — and I-8 asks whether shared and unshared execution agree, a question that
 /// is only meaningful if there is one answer to that.
 pub fn operator_for(node: &CircuitNode) -> Result<Option<Box<dyn Operator>>> {
+    operator_for_with(node, "unlabelled", &mut MemFactory::new())
+}
+
+/// The operator one plan node describes, with its state from `factory` (C8).
+pub fn operator_for_with(
+    node: &CircuitNode,
+    label: &str,
+    factory: &mut dyn BackendFactory,
+) -> Result<Option<Box<dyn Operator>>> {
     Ok(match node {
         CircuitNode::Source { .. } => None,
 
@@ -119,8 +156,12 @@ pub fn operator_for(node: &CircuitNode) -> Result<Option<Box<dyn Operator>>> {
                 left.schema().clone(),
                 right.schema().clone(),
                 keys.clone(),
-                Box::new(MemBackend::new()),
-                Box::new(MemBackend::new()),
+                factory
+                    .create(&format!("{label}-left"))
+                    .map_err(state_error)?,
+                factory
+                    .create(&format!("{label}-right"))
+                    .map_err(state_error)?,
             )
             .map_err(ops_error)?,
         )),
@@ -136,14 +177,14 @@ pub fn operator_for(node: &CircuitNode) -> Result<Option<Box<dyn Operator>>> {
                 schema.clone(),
                 keys.clone(),
                 aggregates.clone(),
-                Box::new(MemBackend::new()),
+                factory.create(label).map_err(state_error)?,
             )
             .map_err(ops_error)?,
         )),
 
         CircuitNode::Distinct { input } => Some(Box::new(Distinct::new(
             input.schema().clone(),
-            Box::new(MemBackend::new()),
+            factory.create(label).map_err(state_error)?,
         ))),
     })
 }
@@ -154,6 +195,15 @@ pub fn circuit_error(error: current_circuit::CircuitError) -> SqlError {
     SqlError::PlanWiringMismatch {
         emitted: error.to_string(),
         expected: "a circuit the plan describes".to_owned(),
+    }
+}
+
+/// A backend that could not be opened is a *wiring* failure, not a refusal: the query bound, so
+/// nothing the user wrote is at fault.
+pub fn state_error(error: current_state::StateError) -> SqlError {
+    SqlError::PlanWiringMismatch {
+        emitted: error.to_string(),
+        expected: "a state backend the plan's operators can use".to_owned(),
     }
 }
 

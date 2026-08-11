@@ -67,6 +67,15 @@ impl Handle {
     pub fn id(self) -> u64 {
         self.0
     }
+
+    /// The handle a circuit reported on its own has: there is no registration behind it.
+    ///
+    /// `u64::MAX` rather than 0, so it can never collide with a real handle, and named rather than
+    /// written as a literal wherever it is needed.
+    #[must_use]
+    pub const fn unregistered() -> Handle {
+        Handle(u64::MAX)
+    }
 }
 
 /// Whether the memo shares circuitry at all.
@@ -166,6 +175,10 @@ pub struct Memo {
     inputs: BTreeMap<String, ZSetBatch>,
     registrations: BTreeMap<Handle, Registration>,
     next_handle: u64,
+    /// Where every operator's state comes from. One factory for the memo's whole life: a shared node's
+    /// backend outlives the registration that created it, so whoever registers second must not be able
+    /// to give the node it attached to a different store.
+    factory: Box<dyn current_state::BackendFactory>,
 }
 
 impl Memo {
@@ -175,6 +188,15 @@ impl Memo {
     }
 
     pub fn with_sharing(catalog: Catalog, sharing: Sharing) -> Result<Memo> {
+        Memo::with_backends(catalog, sharing, Box::new(current_state::MemFactory::new()))
+    }
+
+    /// A memo whose operators take their state from `factory` (C8).
+    pub fn with_backends(
+        catalog: Catalog,
+        sharing: Sharing,
+        factory: Box<dyn current_state::BackendFactory>,
+    ) -> Result<Memo> {
         Ok(Memo {
             dataflow: Circuit::empty()?,
             sharing,
@@ -184,7 +206,14 @@ impl Memo {
             inputs: BTreeMap::new(),
             registrations: BTreeMap::new(),
             next_handle: 0,
+            factory,
         })
+    }
+
+    /// What the operators' state is kept in — for `EXPLAIN STATE`'s header and its reconciliation.
+    #[must_use]
+    pub fn backends(&self) -> &dyn current_state::BackendFactory {
+        self.factory.as_ref()
     }
 
     #[must_use]
@@ -445,7 +474,11 @@ impl Memo {
                 .dataflow
                 .attach_source(table.clone(), alias.clone(), schema.clone())?,
             _ => {
-                let op = current_sql::operator_for(node)?.ok_or(MemoError::PlanNodeNotFound)?;
+                // The label the backend is handed out under: the dataflow node it belongs to. Node ids
+                // are stable across removals (C6), so a label is never reused for a different operator.
+                let label = format!("n{}-{}", self.dataflow.live_nodes(), node_kind(node));
+                let op = current_sql::operator_for_with(node, &label, self.factory.as_mut())?
+                    .ok_or(MemoError::PlanNodeNotFound)?;
                 self.dataflow.attach(op, inputs.to_vec(), admit_unbounded)?
             }
         };
@@ -567,6 +600,18 @@ impl Memo {
             .get(table)
             .cloned()
             .ok_or_else(|| MemoError::UnknownTable(table.to_owned()))
+    }
+}
+
+/// The word that goes in a backend label.
+fn node_kind(node: &CircuitNode) -> &'static str {
+    match node {
+        CircuitNode::Source { .. } => "source",
+        CircuitNode::Filter { .. } => "filter",
+        CircuitNode::Project { .. } => "project",
+        CircuitNode::Join { .. } => "join",
+        CircuitNode::Aggregate { .. } => "aggregate",
+        CircuitNode::Distinct { .. } => "distinct",
     }
 }
 

@@ -231,9 +231,18 @@ same ground.
 **What changes in the plan.** `Query` gains a `distinct: bool`, applied after the projection. That is
 a widening of the plan IR both doors will share (D-14), so it is recorded rather than slipped in.
 
-### D-18 · `StateBackend` is frozen, and `RocksBackend` is **not delivered**
+### D-18 · `StateBackend` is frozen — **FINAL as of C8** — and `RocksBackend` is not delivered
 
-*Sprint: C4. Preserves: I-9, D-5. Freezes the trait §5.5 says to freeze at C4's exit.*
+*Sprint: C4; freeze made final in C8. Preserves: I-9, D-5. Freezes the trait §5.5 says to freeze at
+C4's exit.*
+
+> **The freeze is now FINAL.** It was recorded provisional at C4's exit and again at C5's, on the
+> condition that it became final when a second backend validated it, no later than C8 entry. **C8's
+> `RedbBackend` (D-19) implements this trait unchanged** — not one method added, removed, or widened —
+> so the condition is met and the provisional clause is discharged. What the second implementation
+> found is recorded at the end of this entry, because a freeze validated in silence teaches nothing.
+
+
 
 **The freeze.** `StateBackend` is now: `write(&WriteBatch)`, `scan_prefix`, `get`, `len`, `iter_all`,
 `snapshot`, `restore`. C4 added the last two — the "named snapshots" D-15 deliberately left out until
@@ -282,6 +291,29 @@ second implementation. The order-preserving byte codec `RocksBackend` will need
 sweep — so the piece most likely to be got wrong is done. But `RocksBackend` itself is outstanding
 work, it is named in `docs/PROGRESS.md` as such, and C4's gate does not depend on it: every I-4 and
 I-7 claim is proven over `MemBackend` plus real checkpoint files on a real filesystem.
+
+**What the second implementation found (C8).** The paragraph above worried that the freeze was argued
+rather than demonstrated. `RedbBackend` demonstrated it, and the findings are worth the record:
+
+- **One method caused friction, and only one.** `len` returns `usize`, not `Result<usize>`; redb cannot
+  count a table without a transaction, and a transaction can fail. So the backend maintains the count
+  itself, updated inside the write transaction that changes the entries. That is arguably what the
+  signature was always asking for — a count you can read without asking the disk — and it cost eight
+  lines.
+- **Two methods mapped *better* than to `MemBackend`.** `write`'s atomicity and `scan_prefix`'s
+  ordering are native to redb: a write transaction gives the first, and the order-preserving codec
+  (D-15) makes the second a B-tree range rather than a filtered walk. The codec built in C4 for a
+  backend that never arrived turned out to be the piece that made this one straightforward.
+- **`snapshot() -> Vec<u8>` is the freeze's real cost, and it is not redb's fault.** A checkpoint
+  materialises every entry in memory. So C8 can spill state larger than RAM but **cannot checkpoint
+  it** — the spill and the checkpoint have different limits, and the difference is a consequence of
+  this signature. It is named in `docs/PROGRESS.md` rather than worked around, because working around
+  it means unfreezing the trait, and that is a decision for whoever needs it with a gate to prove it.
+- **The trait accounts in entries, and C8's `EXPLAIN STATE` shows why that matters.** The note above
+  said entries are not a proxy for memory and that C8 would "measure real memory". It measures what it
+  can: entries exactly, bytes as a **floor** plus an independent count. A byte *ceiling* per entry is
+  not expressible, because key width is unbounded — which is a fact about the data, not about the
+  interface, and one this trait's shape makes visible instead of hiding.
 
 ### D-19 · The operator-state backend is **redb**, amending D-5
 

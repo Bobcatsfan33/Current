@@ -23,6 +23,9 @@
 //!   matches only, with the rule inventory and the sharing each omission costs written out.
 //! - [`registry`] — [`Memo`]: register, read, deregister; attach to live subtrees; refcounted
 //!   teardown; the I-9 admission for unbounded state.
+//! - [`explain`] — `EXPLAIN STATE` (C8): what every operator holds, per query, with a byte estimate
+//!   that a gate reconciles against the backend's real footprint.
+//! - [`costs`] — the measured constants that estimate turns on, each in the ledger with its artifact.
 //!
 //! ## The one thing to read before changing anything here
 //!
@@ -40,9 +43,15 @@
 //! which mutation each half caught.
 
 pub mod canonical;
+pub mod costs;
 pub mod error;
+pub mod explain;
 pub mod registry;
 
 pub use canonical::{canonicalize, subtree_hash};
 pub use error::{MemoError, Result};
+pub use explain::{
+    explain_circuit, reconcile_circuit, CostModel, ExplainState, OperatorState, QueryState,
+    Reconciliation,
+};
 pub use registry::{Accounting, Admission, Handle, Memo, Registration, Sharing};

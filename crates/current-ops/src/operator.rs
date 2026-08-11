@@ -158,6 +158,15 @@ pub trait Operator: fmt::Debug + Send {
     /// [`StepOutput::errors`], the offending row is dropped (S-22a), and the epoch seals normally.
     fn step(&mut self, inputs: &[&ZSetBatch]) -> Result<StepOutput>;
 
+    /// How many state backends this operator was handed.
+    ///
+    /// `EXPLAIN STATE`'s byte estimate needs it, because a backend costs something even when empty: a
+    /// join holds two stores and therefore two files' worth of overhead. Defaulted to one, which is the
+    /// common case; a stateless operator overrides it to zero.
+    fn backend_count(&self) -> usize {
+        1
+    }
+
     /// A deterministic rendering of whatever this operator remembers, for state fingerprints.
     ///
     /// The default is empty, which is the honest answer for a stateless operator. A stateful one

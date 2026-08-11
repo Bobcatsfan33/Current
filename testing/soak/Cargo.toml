@@ -1,0 +1,21 @@
+[package]
+name = "current-soak"
+description = "The soak harness: RSS sampled across a run, at a fixed memory ceiling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+current-zset.workspace = true
+current-plan.workspace = true
+current-state.workspace = true
+current-circuit.workspace = true
+current-sql.workspace = true
+current-memo.workspace = true
+current-differential.workspace = true
+
+[lints]
+workspace = true

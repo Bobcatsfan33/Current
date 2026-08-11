@@ -85,9 +85,23 @@ impl std::fmt::Debug for Durable {
     }
 }
 
+/// Which store operator state lives in (C8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// `MemBackend`: what every C1–C7 gate ran on.
+    Memory,
+    /// `RedbBackend`: state on disk, in one redb file per operator (D-19).
+    Redb,
+}
+
 /// How a run is configured.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
+    /// Which store operator state lives in.
+    ///
+    /// The C4 gates run twice from C8 on: **the backend that ships must survive the same fire
+    /// `MemBackend` did, not inherit its record.**
+    pub backend: Backend,
     /// Take a checkpoint every `checkpoint_every` epochs. 0 means never.
     pub checkpoint_every: u64,
     /// Compact every `compact_every` epochs, anchored to the live checkpoint. 0 means never.
@@ -108,6 +122,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            backend: Backend::Memory,
             checkpoint_every: 2,
             compact_every: 3,
             sync: SyncPolicy::Deferred,
@@ -124,6 +139,15 @@ impl Config {
             ..Config::default()
         }
     }
+
+    /// The same run, with operator state spilled to redb (C8).
+    #[must_use]
+    pub fn on_redb() -> Config {
+        Config {
+            backend: Backend::Redb,
+            ..Config::default()
+        }
+    }
 }
 
 fn log_dir(dir: &Path) -> PathBuf {
@@ -132,6 +156,11 @@ fn log_dir(dir: &Path) -> PathBuf {
 
 fn ckpt_dir(dir: &Path) -> PathBuf {
     dir.join("ckpt")
+}
+
+/// Where spilled operator state lives, when the backend is `Redb`.
+fn state_dir(dir: &Path) -> PathBuf {
+    dir.join("state")
 }
 
 impl Durable {
@@ -164,8 +193,24 @@ impl Durable {
 
         // Build a circuit of the right shape. Recovery restores state into it; it never has to guess
         // the shape, because the plan is the same plan.
-        let engine =
-            CircuitEngine::build(&scenario.tables, &scenario.query).map_err(|e| e.to_string())?;
+        //
+        // **The spill directory is cleared first, and that is not a shortcut.** `RedbBackend` puts
+        // operator state on disk, but the disk is not how state crosses a restart: C4's protocol says
+        // recovery is *checkpoint + replay*, and the frozen trait's `snapshot`/`restore` is how state
+        // travels. Leaving redb's files in place would give a recovering circuit stale state that no
+        // checkpoint accounted for — a second, unaudited durability path. redb is a **spill target**
+        // here, not a second recovery mechanism, and PROGRESS.md says so out loud.
+        let engine = match _config.backend {
+            Backend::Memory => CircuitEngine::build(&scenario.tables, &scenario.query)
+                .map_err(|e| e.to_string())?,
+            Backend::Redb => {
+                let spill = state_dir(&dir);
+                let _ = std::fs::remove_dir_all(&spill);
+                let mut factory = current_state::RedbFactory::new(&spill);
+                CircuitEngine::build_with(&scenario.tables, &scenario.query, &mut factory)
+                    .map_err(|e| e.to_string())?
+            }
+        };
         let mut circuit = engine.into_circuit();
 
         // R1, R2, R4 · choose and verify a checkpoint, deleting partials.

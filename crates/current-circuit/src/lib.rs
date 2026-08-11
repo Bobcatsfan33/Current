@@ -43,6 +43,6 @@ pub mod error;
 pub mod result_store;
 
 pub use checkpoint::{load as load_checkpoint, take as take_checkpoint};
-pub use circuit::{Circuit, CircuitBuilder, Epoch, NodeId, SinkId};
+pub use circuit::{Circuit, CircuitBuilder, Epoch, NodeId, NodeState, SinkId};
 pub use error::{CircuitError, Result};
 pub use result_store::ResultStore;

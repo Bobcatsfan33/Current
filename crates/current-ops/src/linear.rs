@@ -94,6 +94,11 @@ impl Operator for Filter {
         StateBound::Stateless
     }
 
+    /// A linear operator was handed no store, and §6 C1 says it must stay that way.
+    fn backend_count(&self) -> usize {
+        0
+    }
+
     fn state_size(&self) -> usize {
         0
     }
@@ -176,6 +181,11 @@ impl Operator for Project {
 
     fn state_bound(&self) -> StateBound {
         StateBound::Stateless
+    }
+
+    /// A linear operator was handed no store, and §6 C1 says it must stay that way.
+    fn backend_count(&self) -> usize {
+        0
     }
 
     fn state_size(&self) -> usize {

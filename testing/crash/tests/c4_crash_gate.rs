@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use current_crash::{
     run_clean, run_with_fault, without_emission_counts, Config, Fault, FaultChoice,
 };
-use current_differential::{CircuitEngine, Scenario};
+use current_differential::{CircuitEngine, EngineUnderTest, Scenario};
 use current_log::Seam;
 
 /// A fresh directory per cycle, named by seed so a failure can be reproduced by hand.
@@ -394,5 +394,113 @@ fn a_torn_checkpoint_over_a_compacted_log_recovers_by_bootstrapping() {
     assert!(
         bootstrapped >= 100,
         "only {bootstrapped} of {checked} exercised the bootstrap path"
+    );
+}
+
+/// **The C4 gates, re-run on the backend that ships (C8).**
+///
+/// > the backend that ships must survive the same fire `MemBackend` did, not inherit its record
+///
+/// The same crash-and-recover cycles, the same twin comparison, the same I-4 re-offer — with operator
+/// state in redb files instead of `BTreeMap`s. Fewer cycles than the 10,000-cycle gate, because every
+/// cycle now opens and commits real transactions; the number is stated rather than tuned silently, and
+/// the seam-coverage assertion is the same one.
+#[test]
+fn crash_and_recover_on_redb() {
+    // A twentieth of the `MemBackend` gate's 10,000, because every cycle now opens and commits real
+    // redb transactions: 10,000 would take an hour and a half. 600 is where all 26 named seams still
+    // fire — checked by the assertion at the end, not assumed — and the figure is stated here rather
+    // than tuned quietly.
+    const CYCLES: u64 = 600;
+
+    let mut cycles = 0u64;
+    let mut faults_fired = 0u64;
+    let mut bootstrapped = 0u64;
+    let mut seams_fired: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
+    let mut seams_planned: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
+
+    let mut seed = 0u64;
+    while cycles < CYCLES {
+        seed += 1;
+        let Ok(scenario) = Scenario::generate(seed) else {
+            continue;
+        };
+        if <CircuitEngine as EngineUnderTest>::build(&scenario.tables, &scenario.query).is_err() {
+            continue;
+        }
+        let config = Config::on_redb();
+        let choice = FaultChoice::for_seed(seed);
+        if let Fault::Seam(plan) = choice.fault {
+            seams_planned.insert(plan.seam.name());
+        }
+
+        let clean_dir = dir_for(seed, "redb-clean");
+        let clean = run_clean(&clean_dir, &scenario, config)
+            .unwrap_or_else(|e| panic!("seed {seed}: the clean redb run failed: {e}"));
+
+        let crash_dir = dir_for(seed, "redb-crash");
+        let (recovered, fired) = run_with_fault(&crash_dir, &scenario, choice.fault, config)
+            .unwrap_or_else(|e| panic!("seed {seed}: redb recovery failed: {e}"));
+        if let Some(name) = fired {
+            faults_fired += 1;
+            seams_fired.insert(name);
+        }
+
+        assert_eq!(
+            recovered.answers.last(),
+            clean.answers.last(),
+            "seed {seed}: the recovered answer differs from the uncrashed twin, on redb (I-7)"
+        );
+        if recovered.bootstrapped {
+            bootstrapped += 1;
+            assert_eq!(
+                recovered
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                clean
+                    .fingerprints
+                    .last()
+                    .map(|f| without_emission_counts(f)),
+                "seed {seed}: a bootstrapped redb recovery must hold the same state"
+            );
+        } else {
+            assert_eq!(
+                recovered.fingerprints.last(),
+                clean.fingerprints.last(),
+                "seed {seed}: the recovered STATE differs from the uncrashed twin, on redb (I-7)"
+            );
+        }
+        assert_eq!(
+            recovered.epoch, clean.epoch,
+            "seed {seed}: the recovered epoch differs, on redb"
+        );
+        assert_eq!(
+            recovered.log, clean.log,
+            "seed {seed}: the recovered LOG differs from the uncrashed twin, on redb (I-4)"
+        );
+
+        let _ = std::fs::remove_dir_all(&clean_dir);
+        let _ = std::fs::remove_dir_all(&crash_dir);
+        cycles += 1;
+    }
+
+    println!(
+        "C8 redb crash gate: {cycles} cycles · {faults_fired} faults fired · \
+         {bootstrapped} recovered by bootstrap · {} of {} planned seams fired",
+        seams_fired.len(),
+        seams_planned.len()
+    );
+    assert!(
+        faults_fired > 0,
+        "a crash suite that injected no faults proves nothing"
+    );
+    // Every seam the seeds planned must actually have fired, exactly as the 10,000-cycle gate demands.
+    let missed: Vec<&&str> = seams_planned.difference(&seams_fired).collect();
+    assert!(
+        missed.is_empty(),
+        "seams planned but never fired on redb: {missed:?}"
     );
 }

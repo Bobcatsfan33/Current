@@ -101,6 +101,20 @@ enum Node {
     },
 }
 
+/// What one operator node is holding — the per-operator row of `EXPLAIN STATE` (C8, I-9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeState {
+    pub operator: &'static str,
+    /// The I-9 declaration, rendered.
+    pub declared: String,
+    /// Entries held, as the backend reports them. A measurement, not an estimate.
+    pub entries: usize,
+    /// The budget the declaration allows, or `None` for an admitted-unbounded operator.
+    pub budget: Option<usize>,
+    /// How many state backends this operator was handed (a join has two).
+    pub backends: usize,
+}
+
 /// One query's view of the dataflow: where its answer comes from, and what it holds.
 ///
 /// A sink owns the two integrals a standing query needs — its answer and its live errors — and the
@@ -630,6 +644,34 @@ impl Circuit {
         }
     }
 
+    /// What one node is holding, or `None` for a source (which holds nothing).
+    ///
+    /// The per-operator half of `EXPLAIN STATE` (C8). Everything here is a number the runtime already
+    /// enforced — the entries the backend reports, the budget `check_state_declarations` compares
+    /// against — so the report cannot drift from the accounting: they read the same fields.
+    pub fn node_state(&self, id: NodeId) -> Result<Option<NodeState>> {
+        match self.node_at(id)? {
+            Node::Source { .. } => Ok(None),
+            Node::Operator { op, inputs } => {
+                let declared = op.state_bound();
+                let budget = if matches!(declared, StateBound::Unbounded { .. })
+                    && self.admitted_unbounded.contains(&id)
+                {
+                    None
+                } else {
+                    Some(self.state_budget(declared, inputs, op.name())?)
+                };
+                Ok(Some(NodeState {
+                    operator: op.name(),
+                    declared: declared.to_string(),
+                    entries: op.state_size(),
+                    budget,
+                    backends: op.backend_count(),
+                }))
+            }
+        }
+    }
+
     /// The nodes whose `Unbounded` state declaration a registration admitted (I-9).
     ///
     /// Readable so that "the admission reached the runtime" is a fact a test can check, rather than a
@@ -637,6 +679,12 @@ impl Circuit {
     #[must_use]
     pub fn admitted_unbounded(&self) -> &std::collections::BTreeSet<NodeId> {
         &self.admitted_unbounded
+    }
+
+    /// The highest node index plus one — the range `node_state` may be asked about.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     /// How many nodes are live (holes excluded).

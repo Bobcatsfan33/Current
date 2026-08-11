@@ -18,17 +18,27 @@
 //! that needs one, not in the interface every operator sees. `RocksBackend` will need it;
 //! `MemBackend` is a `BTreeMap` and does not. The full argument is D-15.
 //!
-//! ## What is deliberately absent
+//! ## The two implementations, and why there are two
 //!
-//! Named snapshots. The checkpoint protocol is C4's design and guessing at its shape now would be
-//! worse than leaving a gap that is labelled.
+//! [`MemBackend`] is a `BTreeMap`: the oracle's store, most tests', and the one every circuit got
+//! before C8. [`RedbBackend`] (D-19, amending D-5) is a redb file per operator — the durable one, and
+//! the one that made D-18's trait freeze **final**: the freeze's whole condition was that a second
+//! implementation validate the trait, and this one did without a single change to it.
+//!
+//! Which one a circuit gets is decided by a [`BackendFactory`] threaded in from the caller, never by
+//! the operators. An operator that knew which store it had could behave differently on each, and the
+//! backend-invariance gate exists to assert that none of them can.
 
 pub mod backend;
 pub mod codec;
 pub mod error;
+pub mod factory;
 pub mod mem;
+pub mod redb_backend;
 
 pub use backend::{Key, StateBackend, WriteBatch};
 pub use codec::{decode_entries, decode_key, encode_entries, encode_key};
 pub use error::{Result, StateError};
+pub use factory::{BackendFactory, MemFactory, RedbFactory};
 pub use mem::MemBackend;
+pub use redb_backend::RedbBackend;

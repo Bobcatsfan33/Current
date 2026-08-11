@@ -269,6 +269,33 @@ I-2 restated, and it is the same argument C6's mid-history attach rests on. Boot
 therefore the *same* mechanism with different sources: before a compaction the accumulated input comes
 from the log, after one it comes from the snapshot plus the suffix, and nothing downstream can tell.
 
+## 5a · What a durable state backend adds to this document: nothing (C8)
+
+C8 replaced `MemBackend` with `RedbBackend` for operator state (D-19), which means every stateful
+operator now performs a real transaction on a real file inside every step. The question the sprint had
+to answer before writing any of it was whether that introduces **new write boundaries** — new instants
+between which a crash must be named and tested. It does not, and the reason is worth stating because
+"the backend writes to disk now" sounds like it must:
+
+- **A backend's transaction is atomic and lands inside an existing seam pair.** An operator's writes
+  happen during S3 (step the circuit), which sits between `SealAfterFsyncBeforeStep` and
+  `SealAfterStepBeforeCounter`. A crash there leaves each operator's store either at its previous
+  committed transaction or at its next one — never half-way, because redb is ACID — and in every case
+  the epoch was *not* sealed in the circuit.
+- **Recovery discards whatever the stores hold, wholesale.** R3 loads operator state from the
+  checkpoint through the frozen trait's `restore`, which *replaces* rather than merges. So a partially
+  updated store is not a state recovery has to reason about: it is overwritten before the first replay
+  step.
+- **Therefore the backend is a spill target, not a second durability mechanism.** State crosses a
+  restart through `snapshot`/`restore` and the checkpoint protocol, exactly as it did on `MemBackend`.
+  The spill directory is *cleared* when a circuit is built, and a run that inherited stale redb files
+  would be reading state no checkpoint accounted for — a second, unaudited recovery path.
+
+If a future backend's durability *were* load-bearing — if recovery read the store instead of the
+checkpoint — then its commit points would need naming here and the crash harness would need to land on
+them. That is the test to apply to the next backend, and this paragraph is what it should be compared
+against.
+
 ## 6 · What the crash harness does with this document
 
 The named kill points above are **deterministic seams in the code**, not timers. Each is a call to a

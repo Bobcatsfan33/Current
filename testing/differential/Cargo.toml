@@ -23,5 +23,11 @@ rand_core.workspace = true
 rand_chacha.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# The evidence test checks that the ledger's values match the constants in the code, and one of those
+# constants lives in the soak harness. A dev-dependency cycle — `current-soak` depends on this crate —
+# which cargo permits precisely because a test's dependencies are not part of the library's graph.
+current-soak.workspace = true
+
 [lints]
 workspace = true

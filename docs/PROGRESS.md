@@ -1346,3 +1346,159 @@ The three mutations landed in three different instruments, which is the point of
   receipt when it arrives, not in a `const` chosen by taste.
 
 Per the sprint protocol in `CLAUDE.md`, **C8 does not begin in the session that finished C7.**
+
+---
+
+## C8 — state spill and cold-start honesty
+
+**Objective (§6):** state larger than RAM, and honest numbers about it.
+
+Everything on §6 C8's list is delivered: `RedbBackend` (D-19), the C4 gates re-run on it, backend
+invariance, `EXPLAIN STATE` with a reconciliation gate, the soak harness, and the ceiling gate in CI at a
+fixed cgroup limit. **D-18's freeze is now FINAL.**
+
+This sprint was mostly a sequence of measurements correcting guesses, so the honest summary is that
+list: five constants I got wrong before measuring, two gate designs the measurements broke, and a
+mutation the shape-based leak check failed to catch. All of it is below.
+
+### D-18's provisional clause: discharged, not waived
+
+`RedbBackend` implements `StateBackend` **unchanged** — not one method added, removed, or widened. The
+freeze is recorded FINAL in D-18, with what the second implementation found:
+
+| Finding | Detail |
+| --- | --- |
+| One method caused friction | `len` returns `usize`, not `Result`; redb cannot count a table without a transaction. The backend maintains the count inside the write transaction — eight lines, and arguably what the signature was always asking for |
+| Two mapped **better** than to `MemBackend` | `write`'s atomicity is a redb transaction; `scan_prefix`'s ordering is a B-tree range, because C4's order-preserving codec makes a key prefix a *byte* prefix. The codec built for a backend that never arrived is what made this one straightforward |
+| `snapshot() -> Vec<u8>` is the freeze's real cost | A checkpoint materialises every entry. So C8 spills state larger than RAM but **cannot checkpoint it**. Named, not worked around: working around it means unfreezing the trait |
+
+**redb is a spill target, not a second durability mechanism.** State crosses a restart through the
+checkpoint protocol, as it did on `MemBackend`; the spill directory is *cleared* when a circuit is built,
+because a run inheriting stale redb files would be reading state no checkpoint accounted for.
+`docs/DURABILITY.md` §5a says this, and says why the eight compaction seams did not grow: a backend's
+transaction lands inside an existing seam pair, and recovery replaces its contents wholesale.
+
+### The gates
+
+| Gate condition (§6 C8) | Proven by | Result |
+| --- | --- | --- |
+| A scenario with operator state 10× RAM completes with flat memory | `operator_state_many_times_the_ceiling_completes_with_flat_memory`, run by the `state-ceiling` CI job under `systemd-run -p MemoryMax=128M` | state **10× the ceiling**; RSS peaks at 39 MB and *falls* 4.7% while state grows 300%; locally, 1.08 GB of state against a 38 MB peak — a **28:1 ratio** |
+| RSS sampled across the run, leak fails the job | same test | 157 samples; shape asserted after a stated warm-up, **and** an absolute budget, because the shape alone failed to catch a leak (below) |
+| The ceiling is fixed in the job, not inherited | the job applies it; the test **reads it back** from the cgroup and `CURRENT_CEILING_REQUIRED=1` makes its absence a failure | a ceiling gate on a machine with free memory proves nothing, so it refuses to claim the gate without one |
+| `EXPLAIN STATE` numbers reconcile with actual backend usage | `explain_state_reconciles_with_what_the_backend_actually_occupies`, six rounds as state grows | entries checked against an independent count, bytes against a measured floor and a presence condition |
+| The C4 gates on the backend that ships | `crash_and_recover_on_redb` | **600 cycles, 283 faults, 26 of 26 named seams fired**, twin comparison and I-4 re-offer unchanged |
+| Backend invariance | `the_two_backends_agree_on_every_answer_and_every_logical_state` | **1,200 scenarios**, answers *and* logical state fingerprints identical; `the_spilled_engine_agrees_with_the_oracle` adds 800 against the oracle |
+| Admission control at registration for undeclarable bounds (I-9) | delivered in C6 (`Admission`), unchanged here | — |
+
+**The fingerprint was already logical and needed no fixing**, which is recorded rather than assumed:
+`Operator::render_state` prints decoded keys and weights obtained through the trait, never the store's
+bytes or its file name. The gate asserts it over 1,200 scenarios anyway.
+
+### Five constants I got wrong before measuring
+
+Every one is now in `testing/evidence/registry.json` with an artifact. The engine-constant section of the
+ledger is no longer empty, and the evidence test that used to pin "nothing is tuned" now pins the rule
+that made it worth pinning: **every entry cites a committed artifact, and the ledger's values must equal
+the constants in the code.**
+
+| Guess | Measurement | Where the guess would have gone wrong |
+| --- | --- | --- |
+| an empty redb file costs 12,288 bytes | **1,056,768** | a hundredfold error in every byte figure `EXPLAIN STATE` publishes |
+| 96 bytes per entry | **67…205**, by key width | a single constant cannot describe both |
+| file size grows with entries | at 1,500 entries the file is **smaller than when empty** — redb truncates on commit | a marginal per-entry figure underflowed `u64` |
+| a per-entry ceiling bounds bytes | key width is unbounded; the ceiling gate hit **2,556 bytes/entry** with a 480-character column | the reconciliation gate failed, correctly |
+| redb's cache is a detail | **it is the dominant term**: at 1/8/32 MiB the peak RSS was 38/67/106 MB | the ceiling gate would have failed on redb's 1 GiB default |
+
+`c8-state-costs.json` is **deterministic** — a redb file's size is a function of what was written into it
+— so `the_state_cost_artifact_still_describes_the_backend` recomputes and compares it, exactly as C0's
+coverage artifact is. `c8-cache-sweep.json` is **machine-dependent**, because resident memory is an
+allocator and kernel figure, and no test recomputes it. Both the artifacts and the ledger say which is
+which.
+
+### Two gate designs the measurements broke
+
+1. **`EXPLAIN STATE`'s byte column started as an estimate with a tolerance, became a measured envelope,
+   and ended as a floor plus a presence check.** The envelope died when the ceiling gate reached 269 MB
+   of state against a 36 MB ceiling. What survives is what can be true: every entry costs *at least* so
+   much, and no entries means no footprint beyond the empty files. A tighter model needs a trait that
+   reports bytes, which is a decision above this sprint.
+2. **The ceiling gate's shape needed three attempts**, and the two failures are real limits of the engine,
+   recorded in the test where the next person will look:
+   - `GROUP BY` with a group per row — state is large but the **answer** is one row per group, and a result
+     store is an in-memory integral. 1.5 GiB of RSS against 85 MiB of state.
+   - `GROUP BY` with few groups and many rows — the answer is tiny but `Aggregate` folds a changed group's
+     whole ordered multiset to recompute it (S-30, §5.3's requirement so MIN/MAX survive retraction). A
+     million-row group costs a million entries per epoch that touches it. **C10's name is on that.**
+   What works is a join with near-unique keys behind a selective filter: state unbounded, answer under 100
+   rows, one entry per probe.
+
+   A third limitation surfaced with them: **a `Memo` cannot run under a ceiling its data exceeds**, because
+   it keeps the accumulated input in memory for C7's mid-history catch-up. The ceiling gate drives a
+   circuit directly for that reason. Sourcing catch-up from the log and the snapshot instead of RAM is
+   C9's, where the server owns both.
+
+### The gate's teeth — and the one that a gate half missed
+
+Three mutations, each applied with a marker **grepped before the run** and reverted; `grep -rn MUTANT`
+over `crates/` and `testing/` returns nothing.
+
+| Mutation | Caught by | Blind to it |
+| --- | --- | --- |
+| **(a) spill silently drops an entry under pressure** — one entry in ~1,000 skipped once the store passes 2,000 entries, no error, count unchanged | the **ceiling gate's state-count check**: 210,814 entries held against 210,900 the generator inserted | **every answer test, including the ceiling gate's own answer check.** In this shape each key is probed in the epoch it arrives, so a row lost from one side's integral is never asked for again. The count is the only witness — which is why the check was added |
+| **(b) `EXPLAIN STATE` under-reports** — every operator's entries divided by 64 | the **reconciliation gate**, once it had an independent count: `46 entries reported / 2977 held` | the **byte floor**, which passed it: under-reporting *lowers* the floor, and a lower floor is easier to clear. This is why claim 1 exists |
+| **(c) an injected per-step leak** — every batch retained forever | the **absolute RSS budget**: peak 158 MB against a 96 MB budget | the **shape check**, which passed it at +1.0% growth. The machine was under memory pressure and the OS reclaimed the leaked pages half-way through: the curve climbed 6 → 214 MiB and fell back to 160, so the quartile means came out 1% apart. **A shape can be flattened by the kernel; an absolute budget cannot** |
+
+Two of the three exposed a gate that was weaker than it looked, and in both cases the fix was a new
+instrument rather than a looser threshold. That is the whole reason for applying them.
+
+### What is proven, and by which test
+
+| Claim | Test |
+| --- | --- |
+| A prefix scan returns the prefix in S-7 order, from the B-tree, without sorting | `a_prefix_scan_returns_the_prefix_in_order` |
+| The maintained count follows the table through additions, removals and pass-through-zero | `len_tracks_the_table_through_additions_and_removals` |
+| A batch nets within itself, as `MemBackend` does | `a_batch_nets_within_itself` |
+| An overflowing batch leaves the store untouched | `an_overflowing_batch_leaves_the_store_untouched` |
+| A snapshot taken on one backend restores into the other | `a_snapshot_crosses_between_backends` |
+| State survives a reopen and the count is rebuilt | `state_survives_a_reopen` |
+| A prefix at the top of the key space still scans to the end | `a_prefix_at_the_top_of_the_key_space_still_scans` |
+| Each operator gets its own labelled file; a join gets two, distinguishably | `every_operator_gets_its_own_labelled_file` |
+| A memo on redb answers as a memo in memory does, retractions included | `a_memo_on_redb_answers_as_a_memo_in_memory_does` |
+| `EXPLAIN STATE` reports every operator, marks sharing, and never counts a shared operator twice as usage | `explain_state_reports_each_operator_of_each_query` |
+| An in-memory backend reports honestly that there is nothing to reconcile | `explain_state_reconciles_with_what_the_backend_actually_occupies` |
+| The ledger's values equal the constants in the code, and every entry cites a committed artifact | `every_engine_constant_cites_an_artifact_and_matches_the_code` |
+| The deterministic cost artifact still describes the backend | `the_state_cost_artifact_still_describes_the_backend` |
+
+### What C8 does **not** prove
+
+- **A checkpoint of spilled state does not fit in memory.** `snapshot() -> Vec<u8>` materialises
+  everything, so the ceiling gate takes no checkpoints and a deployment with state larger than RAM cannot
+  checkpoint it through this trait. This is the frozen interface's cost, stated in D-18, and the first
+  thing a future unfreeze should address.
+- **A single operation is not bounded.** `scan_prefix` returns a `Vec`, so a join probe against a key with
+  a million matches materialises a million entries whatever the backend, and an aggregate folds a changed
+  group's whole multiset. The ceiling gate's shape has many keys with few rows each — the realistic case —
+  and both limits are named in the test rather than discovered later.
+- **A `Memo` under a ceiling is untested**, because it holds the accumulated input in RAM (C7). Scheduled
+  at C9, with the server sourcing catch-up from the log and the snapshot.
+- **No throughput number.** The cache size was chosen for *memory*, not for read performance, and
+  §6 C10 owns the trade with a benchmark rather than an argument. Nothing here is a performance claim.
+- **The ceiling gate runs one shape.** It is a join behind a filter, chosen because it is the only shape
+  that satisfies all three constraints at once. A generated population under a ceiling would be better;
+  the differential gates run the population *without* one.
+- **Still no real `kill -9`**, and no compaction policy. Both named in C7, both still true.
+- **The `state-ceiling` job's first CI run is this commit's.** Locally it runs in smoke mode, since a
+  developer machine has no cgroup; the ceiling assertion has only ever been exercised by the job.
+
+### What C9 needs
+
+- **Registry durability is C9's, doc-first** — the forward-pointer recorded at C7's entry. C8 changed
+  nothing about it: `Circuit::snapshot` still carries state, not topology.
+- **The memo's in-RAM input cache is the thing to remove**, and C9 is where it can be: a server owns the
+  log and the snapshot, so catch-up can read from them instead. That also makes a memo runnable under a
+  ceiling, which is the one part of C8's claim that a memo cannot make today.
+- **`EXPLAIN STATE` is a client-facing surface waiting for a door.** It is a function returning a struct;
+  C9's endpoints are where it becomes something a user can ask for.
+- **`EpochDeltas` still has not moved to `current-log`.** Named in C4, C5, C6 and C7.
+
+Per the sprint protocol in `CLAUDE.md`, **C9 does not begin in the session that finished C8.**

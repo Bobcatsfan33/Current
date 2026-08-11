@@ -221,6 +221,11 @@ impl Operator for Join {
         self.state_entries()
     }
 
+    /// Two: the join keeps an integral of each side (§6 C2).
+    fn backend_count(&self) -> usize {
+        2
+    }
+
     /// Both indexes, in key order. `MemBackend` scans in the total order on values (S-7), so this
     /// is a function of the data alone (I-2).
     fn render_state(&self) -> Result<String> {

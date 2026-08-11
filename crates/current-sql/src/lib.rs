@@ -55,7 +55,7 @@ pub mod select;
 pub use circuit_plan::{CircuitNode, CircuitPlan, Rule};
 pub use error::{Result, SqlError};
 pub use incremental::{incrementalize, incrementalize_typed};
-pub use instantiate::{children, instantiate, operator_for};
+pub use instantiate::{children, instantiate, instantiate_with, operator_for, operator_for_with};
 pub use select::BoundQuery;
 
 use current_plan::bind::Catalog;

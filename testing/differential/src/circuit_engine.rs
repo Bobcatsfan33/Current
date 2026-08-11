@@ -82,6 +82,21 @@ impl CircuitEngine {
         let catalog: Catalog = tables.iter().cloned().collect();
         incrementalize_typed(query, &catalog).map_err(|e| e.to_string())
     }
+
+    /// The same engine, with operator state from `factory` (C8).
+    ///
+    /// The backend-invariance gate runs the whole generated population through this twice — once on
+    /// `MemBackend`, once on `RedbBackend` — and compares answers and logical state fingerprints. The
+    /// costume is the same costume: nothing about the comparison knows which store is underneath.
+    pub fn build_with(
+        tables: &[(String, Schema)],
+        query: &Query,
+        factory: &mut dyn current_state::BackendFactory,
+    ) -> Result<Self, String> {
+        let plan = CircuitEngine::plan(tables, query)?;
+        let circuit = current_sql::instantiate_with(&plan, factory).map_err(|e| e.to_string())?;
+        Ok(CircuitEngine { circuit })
+    }
 }
 
 impl EngineUnderTest for CircuitEngine {

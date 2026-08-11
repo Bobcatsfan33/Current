@@ -19,7 +19,7 @@ dataset) and then torn down — same machinery, one code path.
 Current is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C7 complete (with the gaps named below)
+## Status: Sprint C8 complete (with the gaps named below)
 
 Current is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
@@ -54,13 +54,25 @@ ground truth is readable by tools that are not us.
 operators, one big delta, torn down after — because a second execution path would be a second set of
 answers to keep right.
 
+**Operator state does not have to fit in memory.** It lives in redb files, one per operator, behind the
+`StateBackend` trait frozen at C4 — and the freeze is now final, because a second implementation slotted
+in without changing a method of it. In CI, a job runs the engine under a **fixed 128 MiB cgroup ceiling**
+with operator state ten times that, sampling resident memory throughout; measured locally, 1.08 GB of
+state runs in a 38 MB process. The same scenarios on either backend give byte-identical answers and
+byte-identical logical state.
+
+`EXPLAIN STATE` reports what every operator of every query is holding, and a gate checks the report
+against the backends themselves rather than trusting it.
+
 **What does not exist yet:** no server (C9). Nothing here is usable as a database today, and nothing here is
 fast: operator state is a `BTreeMap` walked linearly per probe, an aggregate re-folds a changed
 group's whole value multiset, and `current-oracle` is *deliberately* slow, because its job is to be
 obviously correct, not quick.
 
-**Numbers we publish:** none. Per invariant I-10, no performance claim is made without a
-committed, reproducible benchmark artifact, and no such artifact exists yet. When they exist
+**Numbers we publish:** the memory figures above, and only those. Each traces to a committed artifact in
+`testing/evidence/` — `c8-state-costs.json` (deterministic, recomputed by a test) and
+`c8-cache-sweep.json` (machine-dependent, and labelled as such). **No performance claim** is made:
+nothing here is benchmarked for throughput or latency, per invariant I-10. When they exist
 they will live in `testing/evidence/` and be linked from here, with the worst supported
 configuration quoted alongside the best.
 
@@ -97,6 +109,7 @@ crates/current-circuit/  the circuit: DAG wiring, epochs, step scheduler, result
 crates/current-sql/      SQL -> binder -> logical plan -> the incrementalizer -> circuit plan
 crates/current-memo/     canonicalization, structural hashing, the standing-query registry
 crates/current-batch/    one-shot queries, Parquet snapshots, log compaction, bootstrap
+testing/soak/            the soak harness: RSS sampled across a run, at a fixed memory ceiling
 crates/current-state/    the StateBackend trait, MemBackend, and the order-preserving key codec
 crates/current-log/      the input log: a directory of files, epoch sealing, exactly-once admission
 testing/crash/           the crash harness: named seams, byte faults, recovery vs an uncrashed twin
@@ -108,7 +121,12 @@ docs/                    SEMANTICS.md, PROGRESS.md, DECISIONS.md
 `current-plan` is not in `ARCHITECTURE.md` §5's crate map; it was added in C1 and the reason is
 recorded as **D-14** in [`docs/DECISIONS.md`](docs/DECISIONS.md), before the code moved.
 
-**Known limitations, before you find them:** **nothing decides when to compact** — compaction is a
+**Known limitations, before you find them:** state can **spill** but it cannot be **checkpointed** at
+that size — the frozen trait's `snapshot` returns a byte vector, so a checkpoint materialises every entry
+(D-18 records the cost). A single operation is not bounded either: a prefix scan returns a vector, and an
+aggregate folds a changed group's whole multiset, so a group with a million rows costs a million entries
+per epoch that touches it — C10's work. A memo cannot yet run under a ceiling its *data* exceeds, because
+it keeps the accumulated input in memory for mid-history catch-up. **Nothing decides when to compact** — compaction is a
 function somebody calls, and a policy is a tuning question C8 owns with a receipt. A snapshot holds
 rows, not provenance: `source_id` travels with every batch but is not carried into the snapshot, which
 C11's source-scoped retraction will need. The memo is **not durable** — its shape is the set of
