@@ -140,8 +140,9 @@ memory.** `Log` keeps every sealed batch resident plus one dedup token per appen
 O(retained log) however long the process runs — measured at 1,589 bytes an epoch with nothing else running
 (`c9-soak.json`), which is why the soak asserts a per-epoch coefficient rather than a flat curve. C10's
 work, and `schweep_log::stream::Epochs` is already the streaming reader such a log would use; C9's
-memo-ceiling gate streams a late registration's catch-up through it over 269 MB of input with a 47.2 MB
-peak — a sixth of the input, and a twenty-second of the 1.08 GB of state it builds. **Compaction is refused in the server**, deliberately: recovery derives its epoch by replaying
+memo-ceiling gate streams a late registration's catch-up through it under a **fixed 128 MiB cgroup ceiling
+in CI**: 384 MB of accumulated input streamed and 1.08 GB of state built, in a process whose resident memory
+peaked at **14.7 MB** — 26:1 against the input and 73:1 against the state. **Compaction is refused in the server**, deliberately: recovery derives its epoch by replaying
 retained epochs, so a compacted prefix would report right answers under wrong epoch numbers, and
 `Engine::open` stops instead. **The retained subscription deltas are not durable** — a subscriber that
 falls behind and then meets a server restart is refused and must re-read the answer, which is durable.

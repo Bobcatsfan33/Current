@@ -56,13 +56,22 @@
       "samples": 350,
       "warm_up_samples": 48,
       "peak_rss_bytes": 47218688,
-      "peak_rss_bytes_observed_range": [44384256, 54919168],
+      "peak_rss_bytes_observed_range": [
+        44384256,
+        54919168
+      ],
       "first_quarter_mean_rss": 39237059,
       "last_quarter_mean_rss": 38905883,
       "growth_fraction": -0.008,
-      "growth_fraction_observed_range": [-0.008, 0.182],
+      "growth_fraction_observed_range": [
+        -0.008,
+        0.182
+      ],
       "grown_bytes_as_share_of_input": 0.0,
-      "grown_bytes_as_share_of_input_observed_range": [0.0, 0.031],
+      "grown_bytes_as_share_of_input_observed_range": [
+        0.0,
+        0.031
+      ],
       "assertion": "grown bytes < 12.5% of the input streamed"
     },
     "input_to_peak_rss_ratio": 5.7,
@@ -77,9 +86,42 @@
       "established. It bounds how long a history a single catch-up can cross, and it is filed for C10."
     ],
     "probes": [
-      { "chunks": 349, "rows_per_chunk": 5, "padding": 0, "peak_rss_bytes": 8929280, "first_to_last_quarter_mib": [8.1, 8.5], "climbs_every_quarter": true, "bytes_per_chunk": 1200 },
-      { "chunks": 349, "rows_per_chunk": 750, "padding": 480, "peak_rss_bytes": 40665088, "first_to_last_quarter_mib": [34.3, 38.5], "climbs_every_quarter": true, "bytes_per_chunk": 12000 },
-      { "chunks": 60, "rows_per_chunk": 4400, "padding": 480, "peak_rss_bytes": 134905856, "first_to_last_quarter_mib": [126.5, 123.5], "climbs_every_quarter": false, "bytes_per_chunk": 0 }
+      {
+        "chunks": 349,
+        "rows_per_chunk": 5,
+        "padding": 0,
+        "peak_rss_bytes": 8929280,
+        "first_to_last_quarter_mib": [
+          8.1,
+          8.5
+        ],
+        "climbs_every_quarter": true,
+        "bytes_per_chunk": 1200
+      },
+      {
+        "chunks": 349,
+        "rows_per_chunk": 750,
+        "padding": 480,
+        "peak_rss_bytes": 40665088,
+        "first_to_last_quarter_mib": [
+          34.3,
+          38.5
+        ],
+        "climbs_every_quarter": true,
+        "bytes_per_chunk": 12000
+      },
+      {
+        "chunks": 60,
+        "rows_per_chunk": 4400,
+        "padding": 480,
+        "peak_rss_bytes": 134905856,
+        "first_to_last_quarter_mib": [
+          126.5,
+          123.5
+        ],
+        "climbs_every_quarter": false,
+        "bytes_per_chunk": 0
+      }
     ]
   },
   "correctness": {
@@ -92,5 +134,39 @@
       "the oracle, recomputed from scratch over the same history"
     ],
     "verdict": "all three agree, byte for byte (I-1)"
+  },
+  "measured_in_ci": {
+    "$comment": [
+      "THE GATE'S NUMBERS ARE THESE. C8 set the precedent and the reason has not changed: a developer",
+      "machine has no cgroup, so the local run declines to claim the gate and holds itself to a fixed",
+      "RSS budget instead. These come from the memo-ceiling job, which applies the ceiling with",
+      "systemd-run and sets CURRENT_CEILING_REQUIRED=1 so its absence would fail rather than pass.",
+      "CI run 31523102980, ubuntu-latest."
+    ],
+    "ceiling_bytes": 134217728,
+    "ceiling_read_back_from": "/sys/fs/cgroup/system.slice/run-r7469846eec8e49ac8de2f54faca63740.scope/memory.max",
+    "target_accumulated_input_bytes": 402653184,
+    "epochs": 523,
+    "state_bytes_after_catch_up": 1077944320,
+    "replay_phase": {
+      "samples": 524,
+      "peak_rss_bytes": 8179712,
+      "growth_fraction": 0.0
+    },
+    "catch_up_phase": {
+      "samples": 524,
+      "warm_up_samples": 48,
+      "peak_rss_bytes": 14729216,
+      "first_quarter_mean_rss": 14553019,
+      "last_quarter_mean_rss": 14692972,
+      "growth_fraction": 0.01,
+      "grown_bytes": 139952,
+      "grown_bytes_as_share_of_input": 0.0003
+    },
+    "input_to_peak_rss_ratio": 26.1,
+    "state_to_peak_rss_ratio": 73.2,
+    "wall_clock_seconds": 26.68,
+    "verdict": "PASSED under a real 128 MiB ceiling: 384 MB of accumulated input streamed and 1.08 GB of state built, in a process whose resident memory peaked at 14.7 MB — 26:1 against the input and 73:1 against the state",
+    "what_the_two_platforms_say_about_the_per_pass_residue": "0.03% of the input on Linux against 0% to 3.1% on macOS. Both are small and both are positive; two orders of magnitude between them is evidence that the residue is the allocator's page-return policy rather than anything redb writes, which is the first real discrimination between the two candidates named above. It is still not proof, and C10 owns it."
   }
 }

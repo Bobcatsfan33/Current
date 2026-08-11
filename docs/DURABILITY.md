@@ -357,10 +357,11 @@ exactly-once, 6,459 epochs recovered, and 968 of the 1,000 cycles killed between
 seal — the position that matters most — with 32 killed before any acknowledgement at all. A concurrent
 subscriber was delivered 5,459 epochs across the run and none of them twice.
 
-Two runs of the finished code produced those same counts, which is the seeded half working as intended: the
-workload and the kill *point* (a count of acknowledged appends) are functions of the seed, so the set of
-batches the server promised is reproducible. The instruction the signal lands on is not, and that is the
-property under test.
+Three runs of the finished code produced those same counts — two on macOS and one on the Linux CI runner,
+which took 28 seconds where macOS took 188. That is the seeded half working as intended: the workload and
+the kill *point* (a count of acknowledged appends) are functions of the seed, so the set of batches the
+server promised is reproducible across operating systems. The instruction the signal lands on is not, and
+that is the property under test.
 
 **What this retires.** The limit above — "it is not 10,000 process kills" — is retired for the *class of
 failure a dying process produces*: a real `SIGKILL` at an arbitrary instruction, with the OS doing whatever

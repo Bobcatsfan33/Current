@@ -1568,23 +1568,25 @@ rather than because prose was tidied:
 | The differential harness runs **over the network**, green vs the oracle | `the_network_door_agrees_with_the_oracle_over_the_whole_renderable_population` | **2,028 scenarios, 9,516 epochs, 11,544 answer comparisons** over real sockets, every family, retractions included, 122 error answers crossing as errors |
 | Same-door extends: network, SQL and typed doors produce identical **plans** | `the_three_doors_produce_one_plan` | 52 scenarios, structural hash **and** structural form identical through all three |
 | … and identical **counters** (I-6) | `the_network_door_does_the_same_work_as_the_typed_door` | 52 scenarios, 248 epochs compared counter for counter |
-| **THE REAL `kill -9`**: ≥1,000 random points under concurrent ingest + query + subscribe | `a_killed_schweepd_recovers_exactly_once_and_matches_its_never_crashed_twin` | **1,000 real `SIGKILL`s**, 24,219 acknowledged appends verified exactly-once, 6,459 epochs recovered, 5,459 epochs delivered to the subscriber with none twice; 968 cycles killed *between* an ack and a seal and 32 before any acknowledgement at all |
+| **THE REAL `kill -9`**: ≥1,000 random points under concurrent ingest + query + subscribe | `a_killed_schweepd_recovers_exactly_once_and_matches_its_never_crashed_twin` | **1,000 real `SIGKILL`s**, 24,219 acknowledged appends verified exactly-once, 6,459 epochs recovered, 5,459 epochs delivered to the subscriber with none twice; 968 cycles killed *between* an ack and a seal and 32 before any acknowledgement at all. **CI reproduced every one of those counts**, on Linux, in 28 s where macOS took 188 |
 | Every acked batch in exactly one epoch after restart (I-4) | the same gate, per cycle | the workload makes it readable: token *i* appends row `(i, 1)`, so a doubled application reads `(i, 2)` |
 | Recovery equals the never-crashed twin (I-7) | the same gate, per cycle | the **full** fingerprint, emission counters included — no relaxation |
 | No subscriber receives an epoch twice after resume | `every_sealed_epoch_is_delivered_exactly_once_on_every_polling_schedule`, and the kill matrix's own subscriber | four polling schedules × 12 epochs, delivered epochs exactly `1..=12` on each; and in the matrix, delivery is strictly increasing before the kill and a resume at the recorded token either delivers only later epochs or is `Rejected` |
 | Subscriber crash: kill the **subscriber** mid-stream, resume by token | `a_killed_subscriber_resumes_by_token_without_a_duplicate_or_a_gap` | **24 real `SIGKILL`s of a real subscriber process**, 40 epochs each, all 24 landing mid-stream; journal across the resume is every epoch exactly once |
-| A `Memo` registers a late query under the ceiling, input exceeding it | `a_late_registration_catches_up_over_more_input_than_the_ceiling_inside_its_budget` | **269 MB of accumulated input, 1.08 GB of state, peak RSS 47.2 MB** — a sixth of the input it streamed — with resident growth across the catch-up between 0% and 3.1% of that input over four runs |
+| A `Memo` registers a late query under the ceiling, input exceeding it | `a_late_registration_catches_up_over_more_input_than_the_ceiling_inside_its_budget`, run by the `memo-ceiling` CI job under `systemd-run -p MemoryMax=128M` | **measured in CI, under the real cgroup:** ceiling read back as 134,217,728 bytes; **384 MB of accumulated input streamed and 1.08 GB of state built, in a process whose resident memory peaked at 14.7 MB** — 26:1 against the input, 73:1 against the state — with 139,952 bytes of growth across the catch-up, 0.03% of the input, in 26.7 s |
 | … and answers what the oracle answers | `a_late_registration_answers_what_the_oracle_answers` | oracle, an epoch-0 registration and a late registration agree byte for byte over 30 epochs |
 | Soak: a full window under load, RSS curve within shape **and** budget | `a_server_under_load_for_a_full_window_does_not_leak_per_epoch` | 3,000 epochs, **1,513–1,810 bytes/epoch against a 4,096 budget** over three runs, attributed — and the *shape* half is the slow-consumer gate's budget plus the coefficient here, because a server's curve is not flat and cannot be (see below) |
 | `DURABILITY.md` records which limits this retires and which remain | `docs/DURABILITY.md` §"C9: the real kills exist" | a four-row table; power loss still **not covered**, and said so |
 
-**What is reproducible about the kill matrix, and what is not.** Two 1,000-cycle runs of the finished code
-reported the *same* figures — 24,219 acknowledged appends, 6,459 epochs recovered, 32 cycles killed before
-any acknowledgement, 968 killed between an acknowledgement and a seal. That is the seeded half doing its
-job: the workload and the kill *point* (a count of acknowledged appends) come from the seed, so the set of
-batches the server promised is a function of the seed. What is not reproducible, deliberately, is the
-machine instruction the signal lands on — which is the property under test, and the reason every assertion
-is written to hold for any position.
+**What is reproducible about the kill matrix, and what is not.** Three 1,000-cycle runs of the finished code
+— two on macOS, one on the Linux CI runner — reported the *same* figures: 24,219 acknowledged appends,
+6,459 epochs recovered, 5,459 epochs delivered to the subscriber, 32 cycles killed before any
+acknowledgement, 968 killed between an acknowledgement and a seal. That is the seeded half doing its job:
+the workload and the kill *point* (a count of acknowledged appends) come from the seed, so the set of batches
+the server promised is a function of the seed and not of the machine — across two operating systems and a
+seven-fold difference in wall clock. What is **not** reproducible, deliberately, is the machine instruction
+the signal lands on. That is the property under test, and the reason every assertion is written to hold for
+any position.
 
 Zero-flake held: every network test binds `127.0.0.1:0` and reads the port back, no test sleeps, and
 readiness is always an event (a port file the child wrote after binding, or a response) rather than a wait.
