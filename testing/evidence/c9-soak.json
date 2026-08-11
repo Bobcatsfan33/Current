@@ -100,5 +100,25 @@
   },
   "one_binary_per_measurement": {
     "$comment": "Every RSS-measuring test in this crate is its own test binary, because resident memory is a property of the process. The slow-consumer gate moved to testing/soak/tests/c9_slow_consumer.rs for that reason; the C9 memo-ceiling gate learned it the hard way (see c9-memo-ceiling.json)."
+  },
+  "measured_in_ci_nightly": {
+    "$comment": "The nightly-soak job's first run: ten times the per-push window, on ubuntu-latest, release profile. CI run 31525525249.",
+    "epochs": 10000,
+    "epochs_delivered_to_the_subscriber": 9999,
+    "register_deregister_cycles": 100,
+    "first_quarter_mean_rss": 11716605,
+    "last_quarter_mean_rss": 24043303,
+    "growth_fraction": 1.052,
+    "rss_bytes_per_epoch": 1651,
+    "per_epoch_budget_bytes": 4096,
+    "verdict": "PASSED: 1,651 bytes an epoch at 10,000 epochs against 1,513 to 1,810 at 3,000 — the coefficient is stable across a three-fold longer window, which is what makes it a coefficient rather than an artifact of the window"
+  },
+  "the_slope_check_compared_unequal_spans": {
+    "$comment": "An instrument bug, found by reading a passing run's numbers rather than a failing one.",
+    "what_it_did": "compared mean(Q2) - mean(Q1) against mean(Q4) - mean(Q2): one quarter against two",
+    "consequence": "perfectly linear growth reports a ratio of 2, so a check written as 'no more than twice' only ever fired on a FOURFOLD acceleration while appearing to fire on a doubling",
+    "how_it_surfaced": "the 10,000-epoch nightly reported '4,140,080 then 8,185,777' — a ratio of 1.98, which reads as an accelerating leak and is in fact perfectly linear growth",
+    "fix": "quarter against quarter, over equal spans. Measured after the fix at 3,000 epochs: 1,188,750 then 1,106,778 — the same twice, which is what linear growth should report",
+    "lesson": "a metric that cannot report 1 for the null hypothesis cannot report anything"
   }
 }

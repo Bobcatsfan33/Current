@@ -1639,7 +1639,7 @@ of reach here rather than assumed to be covered.
 | Two servers fed the same requests hold byte-identical state, counters and plans (I-2) | `two_servers_fed_the_same_requests_are_byte_identical` |
 | C9's deterministic measurements still describe the wire, and the ledger's values match the code | `the_c9_bounds_artifact_still_describes_the_wire` |
 
-### Six things the gates found
+### Seven things the gates found
 
 1. **Recovery applied every input twice** (D-22 addendum). Found by the first restart test, before any
    crash gate existed. The redb store survived a restart and bootstrap hydrated on top of it.
@@ -1679,6 +1679,19 @@ of reach here rather than assumed to be covered.
    The same move fixed a duplication the earlier split had created: the fixture now lives once, in
    `testing/soak/tests/common/mod.rs`. It spent one commit in the crate's *library*, where clippy correctly
    refused it — a fixture that panics belongs in test code (`CLAUDE.md` rule 1).
+
+7. **The soak's slope check compared unequal spans**, so it could not have reported what it claimed. It
+   measured mean(Q2) − mean(Q1) against mean(Q4) − mean(Q2) — one quarter against two — which means
+   perfectly linear growth reports a ratio of **2**, and a check written as "no more than twice" only ever
+   fired on a *fourfold* acceleration. It surfaced from a **passing** run: the first nightly at 10,000
+   epochs printed "4,140,080 then 8,185,777", which reads as an accelerating leak and is in fact linear
+   growth. Quarter against quarter now, and at 3,000 epochs it reports 1,188,750 then 1,106,778 — the same
+   twice, which is what linear growth should say. *A metric that cannot report 1 for the null hypothesis
+   cannot report anything.*
+
+   The nightly's own result is worth keeping next to it: **1,651 bytes an epoch at 10,000 epochs**, against
+   1,513–1,810 at 3,000. The coefficient is stable across a window three times longer, which is what makes
+   it a coefficient rather than an artifact of the window.
 
 ### What C9 does **not** prove
 

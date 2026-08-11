@@ -299,23 +299,32 @@ fn a_server_under_load_for_a_full_window_does_not_leak_per_epoch() {
 
     // And the coefficient must not be *rising*. A constant leak looks like the log; an O(n)-per-epoch cost
     // — re-rendering a ring, re-scanning a registry — does not, and this is the instrument that sees it.
-    let halves = steady.len() / 2;
-    if halves > 8 {
+    //
+    // **Equal spans, and that took two tries.** The first version compared mean(Q2) − mean(Q1) against
+    // mean(Q4) − mean(Q2): one quarter against two. Perfectly linear growth then reports a ratio of 2, so
+    // the check only ever fired on a *fourfold* acceleration while looking as if it fired on a doubling —
+    // and the 10,000-epoch nightly duly reported "4,140,080 then 8,185,777", which is linear growth wearing
+    // the costume of an accelerating leak. Quarter against quarter, linear growth reports ~1.
+    let steady_quarter = steady.len() / 4;
+    if steady_quarter >= 4 {
         let mean = |slice: &[u64]| -> f64 {
             slice.iter().map(|b| *b as f64).sum::<f64>() / slice.len().max(1) as f64
         };
-        let quarter = halves / 2;
-        let early = mean(&steady[..quarter]);
-        let mid = mean(&steady[quarter..halves]);
-        let late = mean(&steady[halves + quarter..]);
-        let first_slope = (mid - early).max(0.0);
-        let second_slope = (late - mid).max(0.0);
-        println!("  slope: {first_slope:.0} then {second_slope:.0} bytes per quarter-window");
+        let q1 = mean(&steady[..steady_quarter]);
+        let q2 = mean(&steady[steady_quarter..steady_quarter * 2]);
+        let q3 = mean(&steady[steady_quarter * 2..steady_quarter * 3]);
+        let q4 = mean(&steady[steady_quarter * 3..]);
+        let early_slope = (q2 - q1).max(0.0);
+        let late_slope = (q4 - q3).max(0.0);
+        println!(
+            "  slope over equal spans: {early_slope:.0} then {late_slope:.0} bytes per quarter-window \
+             (linear growth reports the same twice)"
+        );
         assert!(
-            second_slope <= first_slope * 2.0 + 1_048_576.0,
-            "resident growth accelerated — {first_slope:.0} bytes in the first half of the steady state \
-             and {second_slope:.0} in the second. Linear growth is the log; accelerating growth is an \
-             O(n)-per-epoch cost.\ncurve: {}",
+            late_slope <= early_slope * 2.0 + 1_048_576.0,
+            "resident growth accelerated — {early_slope:.0} bytes across the second quarter of the steady \
+             state and {late_slope:.0} across the fourth, measured over equal spans. Linear growth is the \
+             log; accelerating growth is an O(n)-per-epoch cost.\ncurve: {}",
             curve.render()
         );
     }
