@@ -12,6 +12,7 @@ members = [
     "crates/schweep-memo",
     "crates/schweep-batch",
     "crates/schweep-server",
+    "testing/bench",
     "testing/differential",
     "testing/crash",
     "testing/soak",
@@ -31,6 +32,7 @@ schweep-plan = { path = "crates/schweep-plan" }
 schweep-state = { path = "crates/schweep-state" }
 schweep-log = { path = "crates/schweep-log" }
 schweep-differential = { path = "testing/differential" }
+schweep-bench = { path = "testing/bench" }
 schweep-soak = { path = "testing/soak" }
 schweep-crash = { path = "testing/crash" }
 schweep-oracle = { path = "crates/schweep-oracle" }

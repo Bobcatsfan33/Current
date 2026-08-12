@@ -1,0 +1,15 @@
+[package]
+name = "schweep-bench"
+description = "The measuring instruments: units in the type, and a calibration self-test before any number is reported."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+schweep-zset.workspace = true
+
+[lints]
+workspace = true

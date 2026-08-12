@@ -552,6 +552,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "schweep-bench"
+version = "0.0.0"
+dependencies = [
+ "schweep-zset",
+]
+
+[[package]]
 name = "schweep-circuit"
 version = "0.0.0"
 dependencies = [
