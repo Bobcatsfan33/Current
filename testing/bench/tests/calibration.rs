@@ -31,9 +31,19 @@ use schweep_bench::calibrate::{counted_work, is_measurable, spin, Band};
 use schweep_bench::timer::{clock_is_monotonic, clock_resolution_nanos, paired, sample};
 use schweep_bench::units::{Count, Nanos, Ratio};
 
-/// Work sizes for the linearity checks. Large enough that one round is far above the clock's resolution on
-/// any machine this runs on, small enough that the whole file is a few seconds.
-const UNIT_WORK: u64 = 2_000_000;
+/// Work sizes for the linearity checks.
+///
+/// **Smaller in debug, and that is not a shortcut.** Every check here is about a *ratio* or a *count*, and
+/// neither needs a large absolute workload — what a workload must be is far above the clock's resolution,
+/// which `the_clocks_resolution_is_measured_and_the_workloads_clear_it` enforces at a thousandfold rather
+/// than leaving to judgement. Measured: this file took **three minutes** in CI's debug build at the release
+/// size, on every push. A three-minute gate on every push is a gate somebody eventually routes around,
+/// which is a worse instrument than a smaller one that runs.
+const UNIT_WORK: u64 = if cfg!(debug_assertions) {
+    50_000
+} else {
+    2_000_000
+};
 
 /// Rounds per sample. Odd, so the median is a measured value rather than the mean of two.
 const ROUNDS: usize = 9;
