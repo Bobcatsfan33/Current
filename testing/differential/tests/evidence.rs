@@ -27,6 +27,7 @@ const ARTIFACTS: &[&str] = &[
     "testing/evidence/c9-bounds.json",
     "testing/evidence/c9-memo-ceiling.json",
     "testing/evidence/c9-soak.json",
+    "testing/evidence/c10-residency.json",
 ];
 
 #[test]

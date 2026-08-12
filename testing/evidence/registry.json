@@ -128,6 +128,16 @@
       "sprint": "C9"
     },
     {
+      "name": "HISTORY_RESIDENCY_SHARE",
+      "value": 0.05,
+      "location": "testing/soak/tests/c10_log_residency.rs",
+      "steers": "How much of an added history the log may hold resident before the C10 residency gate fails. It is the threshold that defines what 'the log does not hold its history' means as a number.",
+      "justification": "Measured on both sides of the change, in c10-residency.json. The design this replaces held the batches, so its share was approximately 1.0 — any threshold below a half would have failed it. Five percent rather than one, because the figure has to leave room for what legitimately does grow: 16 bytes of span index per epoch, one dedup token per acknowledged append, and the allocator's own behaviour. Measured after the change: 226,226,474 extra bytes of history cost 3,457,024 bytes of resident memory, 1.53% — inside the gate by a factor of three, and outside the pre-C10 figure by a factor of sixty.",
+      "artifact": "testing/evidence/c10-residency.json",
+      "measured_on": "Apple M-series laptop, macOS, release profile. Machine-dependent: RSS is an allocator and kernel figure, so this artifact is NOT recomputed by a test. The gate asserts a share rather than a value for that reason.",
+      "sprint": "C10"
+    },
+    {
       "name": "SLOW_CONSUMER_BUDGET_BYTES",
       "value": 33554432,
       "location": "testing/soak/tests/c9_server_soak.rs",

@@ -15,7 +15,8 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C7** — one-shot queries, Parquet ground truth, compaction | **complete; exit gate green in CI** |
 | **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18's freeze now FINAL** |
 | **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
-| C10 … C13 | not started |
+| **C10** — performance | **IN PROGRESS — the instruments and residency are done and gated; the hot loops and the four benchmarks are not. See the section below for exactly which** |
+| C11 … C13 | not started |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
 > while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
@@ -1739,3 +1740,85 @@ of reach here rather than assumed to be covered.
 - **Sharing-is-timed and the overlapping-query-set generator**, both promised to C10 at C6's exit, both
   still owed.
 - **A benchmark harness**, since every performance question in this document has been deferred to it.
+
+---
+
+## C10 — performance (IN PROGRESS)
+
+**This section describes an unfinished sprint, and says so at the top rather than at the bottom.** Two of
+C10's five parts are done and gated; three are not started. What follows separates them, because a
+performance sprint reported as "mostly done" is a performance sprint whose numbers nobody can locate.
+
+### Done, and gated
+
+**0 · The instruments, and the law that they come first.** C9's least comfortable result was that three of
+its seven findings were flaws in its own instruments, every one of which passed while being wrong. So no
+benchmark in this repository reports a number until `testing/bench/tests/calibration.rs` is green:
+
+| The instrument claims | The gate checks it by | Result here |
+| --- | --- | --- |
+| the clock can be trusted | it is monotonic over 200,000 readings, and its resolution is **measured** | 41 ns on this machine |
+| a workload is measurable | every workload must exceed the resolution 1,000-fold | smallest is 3.2 ms, ~78,000× |
+| timing is **linear in work** | 1×, 2×, 4× interleaved; the ratios must land in ±20% bands | 1.950–2.052× and 3.82–4.20× over six runs |
+| counting is **exact** | a workload of known count is counted exactly, not approximately | exact at 0, 1, 2, 1,000 and 999,983 |
+| the harness is not in the number | an empty round against a real one | under a thousandth |
+| a comparison measures the thing, not the order | the same workload paired against itself must report 1.0 | 0.988–1.003× |
+
+Units live in the type — `Nanos`, `Bytes`, `Count`, `Ratio` — they do not mix, dividing by zero returns
+`None` rather than an infinity that formats as a plausible number, subtraction saturates, and a `Ratio`
+cannot print as a percentage by accident. That last one is C9's bug made impossible rather than fixed.
+
+**The gate immediately found a defect in itself, which is the entire argument for having it.** Timing 1×,
+2× and 4× as three consecutive samples gave doubling ratios of 1.73 to 1.98 across five back-to-back runs:
+the machine drifts over the ~100 ms between the first size and the last, and the first size wore all of it.
+Measured **interleaved** — a rotating N-way generalisation of the paired method — the same measurement is
+centred where the truth is. The old numbers are in the doc comment, because the next person to write a
+comparison here needs to know that consecutive samples do not compare.
+
+**1 · Residency.** C9's largest named limit, closed. `Log` held every sealed batch resident; it now holds a
+**byte range per epoch** and reads the records back when asked. Three paths were O(history) and all three
+now stream: the open scan (which also read the whole segment with `read_to_end`), `Log::epoch` (which
+returned a borrow of what was held, and now returns owned batches read from the span), and compaction
+(which assembled its whole output in a `Vec<u8>`, and now writes incrementally while rebuilding the span
+index exactly from the frame lengths).
+
+| Claim | Test | Result |
+| --- | --- | --- |
+| ten times the history does not cost ten times the memory | `a_logs_resident_memory_does_not_track_its_history` | **226 MB of extra history cost 3.4 MB of RSS — 1.53%**, against a 5% gate and against ~100% for the design it replaces |
+| the span index and a full scan agree | `the_span_index_and_a_full_scan_agree_epoch_for_epoch` | epoch for epoch over 241 epochs |
+| performance work moved no result byte (I-1) | the 10,000-cycle crash gate, the compaction gate, the 1,000-`SIGKILL` matrix, the whole differential suite | all green against the paged log |
+
+What still grows with history is measured and named rather than left to be discovered: **one dedup token
+per acknowledged append** — I-4's price, since a token forgotten is a batch applied twice — and 16 bytes of
+span index per epoch. `Log::dedup_len` and `Log::index_bytes` exist so a gate can measure them.
+
+**5(a) · The calibration tooth.** A miscounted workload — the last operation performed but not counted —
+which the counting check catches at the smallest case (asked 1, reported 0). Marker-grepped and reverted.
+
+### Not done, and not begun
+
+Named individually, because "the rest of C10" is not a description anybody can act on:
+
+- **Un-refusing server-side compaction.** The log pages, but `Engine::open` still returns `Unsupported`
+  for a compacted prefix. Doing it needs two things this session did not build: a `Memo` that can be told
+  its epoch after a bootstrap (`Circuit::set_epoch` exists; the memo does not expose it), and a **streaming**
+  snapshot hydration, since hydrating a Parquet snapshot as one delta would reintroduce O(data) residency
+  through the other door.
+- **2 · Bounded single operations.** `scan_prefix` still returns a `Vec`, and an aggregate still folds a
+  changed group's whole multiset. Unstarted.
+- **3 · The hot loops.** No vectorised inner loops, no `consolidate()` as sort+merge, and **no `unsafe`
+  anywhere** — every crate still carries `#![forbid(unsafe_code)]`. D-1's inventory discipline has not been
+  exercised because there is nothing yet to exercise it on.
+- **4 · The benchmarks.** None of the four exist: maintenance cost vs change volume (and `EXPLAIN
+  MAINTENANCE` with it), standing-answer read latency, one-shot vs DuckDB on TPC-H SF0.1, and the swarm.
+  The overlapping-query-set generator that serves both the strengthened I-8 gate and the swarm is not
+  written. **No performance number is claimed anywhere**, which is the honest state of a sprint whose
+  benchmarks do not exist: the instruments are ready and have measured nothing but themselves.
+- **5(b) · The sharing-regression tooth.** It requires the swarm benchmark to exist first, since what it
+  proves is that the swarm can see a cost shift.
+
+### What the next session needs
+
+Start where this one stopped: compaction in the server (the two missing pieces are named above), then item
+2, then item 3, then the benchmarks — and the benchmarks in the user's order, because the swarm is the one
+the README will lead with and therefore the one whose calibration matters most.
