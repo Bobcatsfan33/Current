@@ -11,14 +11,14 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use schweep_zset::{Row, Schema};
 
 use crate::error::{LogError, Result};
 use crate::fault::{FaultInjector, Seam};
-use crate::record::{frame, read_framed, Record};
+use crate::record::{frame, Record};
 
 /// Epochs are dense integers starting at 1 (S-6).
 pub type Epoch = u64;
@@ -87,8 +87,21 @@ pub struct Log {
     dedup: BTreeMap<String, u64>,
     /// Batches appended but not yet sealed into an epoch.
     pending: Vec<Batch>,
-    /// Batches per sealed epoch, in epoch order. Epoch `n` is at index `n - retained_from - 1`.
-    sealed: Vec<Vec<Batch>>,
+    /// **Where each sealed epoch's records are, not what they are** (C10).
+    ///
+    /// Until C10 this held the batches themselves, and a server's resident memory was therefore
+    /// O(retained log): C9's soak measured 1,589 bytes an epoch with nothing else running, and its
+    /// memo-ceiling gate peaked at 342 MB streaming 269 MB of history *through a `Log`* while the
+    /// consumer's own footprint was a fraction of that. What lives here now is a byte range per epoch —
+    /// sixteen bytes — and [`Log::epoch`] reads the records from the segment when somebody asks.
+    ///
+    /// Epoch `n` is at index `n - retained_from - 1`.
+    sealed: Vec<EpochSpan>,
+    /// The segment's length in bytes, tracked as records are written so that a span can be closed
+    /// without asking the filesystem. Rebuilt by the open scan.
+    segment_len: u64,
+    /// Where the epoch currently being appended to begins.
+    epoch_start: u64,
     /// The live segment file.
     segment: PathBuf,
     /// The last epoch whose records compaction discarded; 0 before any compaction.
@@ -99,6 +112,74 @@ pub struct Log {
     retained_from: Epoch,
     /// The live snapshot directory, if a compaction has published one.
     snapshot: Option<PathBuf>,
+}
+
+/// How much of the segment the open scan and [`Log::epoch`] buffer at a time.
+///
+/// 64 KiB, matching `stream::Epochs` and the log's own write buffering. It bounds what a scan holds
+/// independently of how large the segment is, which is the point of C10's residency change.
+pub const SCAN_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Read one framed record from a stream, returning it and the bytes it consumed.
+///
+/// `Ok(None)` at end of file or at a torn tail — the same rule as [`crate::record::read_framed`], which
+/// reads from a slice. Two readers of one format is the arrangement that drifts, so
+/// `crates/schweep-log/tests/residency.rs` holds them to each other over every truncation of a real
+/// segment.
+fn read_one(reader: &mut impl Read) -> Result<Option<(Record, u64)>> {
+    let mut header = [0u8; 8];
+    if !fill(reader, &mut header)? {
+        return Ok(None);
+    }
+    let mut len_raw = [0u8; 4];
+    let mut crc_raw = [0u8; 4];
+    len_raw.copy_from_slice(header.get(0..4).ok_or(LogError::Corrupt("short frame"))?);
+    crc_raw.copy_from_slice(header.get(4..8).ok_or(LogError::Corrupt("short frame"))?);
+    let len = u32::from_be_bytes(len_raw) as usize;
+    let expected = u32::from_be_bytes(crc_raw);
+
+    let mut payload = vec![0u8; len];
+    if !fill(reader, &mut payload)? {
+        return Ok(None);
+    }
+    if crate::record::crc32(&payload) != expected {
+        return Ok(None);
+    }
+    Ok(Some((Record::decode(&payload)?, 8 + len as u64)))
+}
+
+/// Fill `buffer` completely, or report that the stream ended first.
+fn fill(reader: &mut impl Read, buffer: &mut [u8]) -> Result<bool> {
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        let Some(slice) = buffer.get_mut(filled..) else {
+            return Ok(false);
+        };
+        match reader.read(slice) {
+            Ok(0) => return Ok(false),
+            Ok(read) => filled += read,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(true)
+}
+
+/// The byte range one sealed epoch's records occupy in the segment.
+///
+/// Sixteen bytes an epoch, against the batches themselves — which is the whole of C10's residency change.
+/// The range covers the epoch's `Append` records and stops before its `SealEpoch` record: the seal is the
+/// boundary, not content, and including it would make every read decode a record it discards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EpochSpan {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl EpochSpan {
+    #[must_use]
+    pub fn len_bytes(&self) -> u64 {
+        self.end.saturating_sub(self.start)
+    }
 }
 
 /// Where the log's authority lives: the segment, the snapshot, and the epoch they meet at.
@@ -248,6 +329,8 @@ impl Log {
             dedup: BTreeMap::new(),
             pending: Vec::new(),
             sealed: Vec::new(),
+            segment_len: 0,
+            epoch_start: 0,
             segment,
             retained_from,
             snapshot: snapshot.clone(),
@@ -291,24 +374,35 @@ impl Log {
         crate::dedup::encode(&self.dedup)
     }
 
-    /// R5 and R6: scan the segment, stop at the torn tail, rebuild the dedup index.
+    /// R5 and R6: scan the segment, stop at the torn tail, rebuild the dedup index **and the span
+    /// index** — without ever holding more than one record.
+    ///
+    /// Before C10 this read the whole segment with `read_to_end` and kept every batch. Both halves of that
+    /// were O(retained log): the read and the keep. It now streams, and what it retains per epoch is a
+    /// [`EpochSpan`] — two integers — plus the appends after the last seal, which are pending and bounded
+    /// by admission rather than by history.
+    ///
+    /// **What still grows with history is the dedup index**, one entry per acknowledged token, and that is
+    /// I-4's price rather than an oversight: a token forgotten is a batch that can be applied twice.
+    /// `Log::dedup_len` reports it so a gate can measure it, and `docs/PROGRESS.md` records the figure.
     fn replay_from_disk(&mut self, faults: &mut FaultInjector) -> Result<()> {
-        let bytes = match File::open(&self.segment) {
-            Ok(mut file) => {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                bytes
+        let mut reader = match File::open(&self.segment) {
+            Ok(file) => BufReader::with_capacity(SCAN_BUFFER_BYTES, file),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.segment_len = 0;
+                self.epoch_start = 0;
+                return Ok(());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
 
-        let mut at = 0usize;
+        let mut at = 0u64;
+        let mut epoch_start = 0u64;
         let mut pending: Vec<Batch> = Vec::new();
         let mut records_replayed = 0u32;
         // R5: stop at the first record that fails its CRC or is short. Everything after it is
         // discarded — a torn tail is expected, not exceptional.
-        while let Some((record, next)) = read_framed(&bytes, at)? {
+        while let Some((record, consumed)) = read_one(&mut reader)? {
             records_replayed += 1;
             if records_replayed % 4 == 0 && faults.reached(Seam::RecoveryMidReplay) {
                 return Err(LogError::InjectedFault(Seam::RecoveryMidReplay.name()));
@@ -336,14 +430,22 @@ impl Log {
                     });
                 }
                 Record::SealEpoch { .. } => {
-                    self.sealed.push(std::mem::take(&mut pending));
+                    self.sealed.push(EpochSpan {
+                        start: epoch_start,
+                        end: at,
+                    });
+                    // The seal record itself is the boundary; the next epoch starts after it.
+                    epoch_start = at + consumed;
+                    pending.clear();
                 }
             }
-            at = next;
+            at += consumed;
         }
         // Appends after the last seal record are durable but not yet visible: they are pending, and
         // whatever seals next will include them (S-6).
         self.pending = pending;
+        self.segment_len = at;
+        self.epoch_start = epoch_start;
         Ok(())
     }
 
@@ -357,12 +459,13 @@ impl Log {
         &self.pending
     }
 
-    /// The batches of one sealed epoch, for replay.
+    /// The batches of one sealed epoch, **read from the segment** (C10).
     ///
-    /// An epoch at or below [`Log::retained_from`] is not an error the caller can recover from by
-    /// retrying: those records are in the snapshot, and asking the log for them is asking the wrong
-    /// artefact. `EpochCompacted` says so by name rather than reporting it as out of range.
-    pub fn epoch(&self, epoch: Epoch) -> Result<&[Batch]> {
+    /// Owned rather than borrowed, and that is the residency change at its API: the log holds a byte range
+    /// per epoch, not the batches, so there is nothing to lend. What a caller pays is one read of one
+    /// epoch's bytes; what the process no longer pays is the whole history, resident, for the lifetime of
+    /// the server.
+    pub fn epoch(&self, epoch: Epoch) -> Result<Vec<Batch>> {
         if epoch != 0 && epoch <= self.retained_from {
             return Err(LogError::EpochCompacted {
                 requested: epoch,
@@ -376,13 +479,60 @@ impl Log {
             });
         }
         let index = (epoch - self.retained_from - 1) as usize;
-        self.sealed
-            .get(index)
-            .map(Vec::as_slice)
-            .ok_or(LogError::EpochOutOfRange {
-                requested: epoch,
-                sealed: self.sealed_epoch(),
-            })
+        let span = *self.sealed.get(index).ok_or(LogError::EpochOutOfRange {
+            requested: epoch,
+            sealed: self.sealed_epoch(),
+        })?;
+        self.read_span(span)
+    }
+
+    /// Read every `Append` record inside a span.
+    fn read_span(&self, span: EpochSpan) -> Result<Vec<Batch>> {
+        if span.len_bytes() == 0 {
+            return Ok(Vec::new());
+        }
+        let mut file = File::open(&self.segment)?;
+        file.seek(SeekFrom::Start(span.start))?;
+        let mut reader = BufReader::with_capacity(SCAN_BUFFER_BYTES, file.take(span.len_bytes()));
+        let mut batches = Vec::new();
+        while let Some((record, _)) = read_one(&mut reader)? {
+            match record {
+                Record::Append {
+                    source_id,
+                    dedup_token,
+                    table,
+                    entries,
+                } => batches.push(Batch {
+                    source_id,
+                    dedup_token,
+                    table,
+                    entries,
+                }),
+                // A span stops before its seal record, so one inside it means the index and the file
+                // disagree — which is corruption, not a case to skip past.
+                Record::SealEpoch { .. } => {
+                    return Err(LogError::Corrupt("a seal record inside an epoch's span"));
+                }
+            }
+        }
+        Ok(batches)
+    }
+
+    /// How many acknowledged tokens the dedup index holds.
+    ///
+    /// **The one structure that still grows with history**, at one entry per acknowledged batch, and it is
+    /// exposed so a gate can measure it rather than a document assert it. I-4 is why it exists: a token
+    /// forgotten is a batch that can be applied twice. Bounding it needs a retention policy, which is a
+    /// decision and not an optimisation.
+    #[must_use]
+    pub fn dedup_len(&self) -> usize {
+        self.dedup.len()
+    }
+
+    /// Bytes of segment the span index accounts for, and what the index itself costs.
+    #[must_use]
+    pub fn index_bytes(&self) -> u64 {
+        (self.sealed.len() * std::mem::size_of::<EpochSpan>()) as u64
     }
 
     /// Append a batch (`docs/DURABILITY.md` §1, steps A1–A8).
@@ -467,7 +617,9 @@ impl Log {
             ));
         }
 
-        // A7 · index.
+        // A7 · index. The frame's length is added to the segment's tracked length here rather than by
+        // asking the filesystem: the write above is the only thing that extends it.
+        self.segment_len += frame(&record.encode()).len() as u64;
         self.dedup.insert(dedup_token.to_owned(), hash);
         self.pending.push(Batch {
             source_id: source_id.to_owned(),
@@ -512,7 +664,14 @@ impl Log {
             file.sync_all()?;
         }
 
-        self.sealed.push(std::mem::take(&mut self.pending));
+        let seal_bytes = frame(&Record::SealEpoch { epoch }.encode()).len() as u64;
+        self.sealed.push(EpochSpan {
+            start: self.epoch_start,
+            end: self.segment_len,
+        });
+        self.segment_len += seal_bytes;
+        self.epoch_start = self.segment_len;
+        self.pending.clear();
         Ok(epoch)
     }
 
@@ -548,14 +707,52 @@ impl Log {
             .ok_or(LogError::Corrupt("snapshot path has no name"))?
             .to_owned();
 
-        // P6 · write the retained suffix to a *new* segment. The old one is untouched and stays
-        // authoritative until P7.
+        // P6 · write the retained suffix to a *new* segment, **streaming, one epoch at a time**. The old
+        // one is untouched and stays authoritative until P7.
+        //
+        // Streamed rather than assembled in a `Vec<u8>`, for C10's reason: a compaction that materialises
+        // its whole output holds the suffix resident, and the suffix is unbounded. The new segment's span
+        // index is built here as the bytes are written — exactly, from the frame lengths — rather than by
+        // rescanning the file afterwards.
         let next = self.next_segment_name();
         let partial = self.dir.join(format!("{next}.partial"));
-        let mut bytes = Vec::new();
-        for epoch in (anchor + 1)..=self.sealed_epoch() {
-            for batch in self.epoch(epoch)? {
-                bytes.extend_from_slice(&frame(
+        let mut rebuilt: Vec<EpochSpan> = Vec::new();
+        let mut written = 0u64;
+        // Where a future epoch's records will start in the new segment: after the last seal, which is
+        // also where the pending appends were written.
+        let mut rebuilt_epoch_start = 0u64;
+        {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&partial)?;
+            let mut out = std::io::BufWriter::with_capacity(SCAN_BUFFER_BYTES, file);
+            for epoch in (anchor + 1)..=self.sealed_epoch() {
+                for batch in self.epoch(epoch)? {
+                    let framed = frame(
+                        &Record::Append {
+                            source_id: batch.source_id.clone(),
+                            dedup_token: batch.dedup_token.clone(),
+                            table: batch.table.clone(),
+                            entries: batch.entries.clone(),
+                        }
+                        .encode(),
+                    );
+                    out.write_all(&framed)?;
+                    written += framed.len() as u64;
+                }
+                rebuilt.push(EpochSpan {
+                    start: rebuilt_epoch_start,
+                    end: written,
+                });
+                let seal = frame(&Record::SealEpoch { epoch }.encode());
+                out.write_all(&seal)?;
+                written += seal.len() as u64;
+                rebuilt_epoch_start = written;
+            }
+            for batch in &self.pending {
+                let framed = frame(
                     &Record::Append {
                         source_id: batch.source_id.clone(),
                         dedup_token: batch.dedup_token.clone(),
@@ -563,28 +760,14 @@ impl Log {
                         entries: batch.entries.clone(),
                     }
                     .encode(),
-                ));
+                );
+                out.write_all(&framed)?;
+                written += framed.len() as u64;
             }
-            bytes.extend_from_slice(&frame(&Record::SealEpoch { epoch }.encode()));
-        }
-        for batch in &self.pending {
-            bytes.extend_from_slice(&frame(
-                &Record::Append {
-                    source_id: batch.source_id.clone(),
-                    dedup_token: batch.dedup_token.clone(),
-                    table: batch.table.clone(),
-                    entries: batch.entries.clone(),
-                }
-                .encode(),
-            ));
-        }
-        {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&partial)?;
-            file.write_all(&bytes)?;
+            out.flush()?;
+            let file = out
+                .into_inner()
+                .map_err(|_| LogError::Io("flushing the compacted segment".to_owned()))?;
             if self.sync == SyncPolicy::Full {
                 file.sync_all()?;
             }
@@ -622,10 +805,13 @@ impl Log {
             let _ = fs::remove_file(&superseded);
         }
 
-        // The in-memory view follows the on-disk one: the compacted epochs are gone from `sealed`,
-        // and `retained_from` is what keeps `epoch(n)` honest about which epochs the log still has.
-        let drop_count = (anchor - self.retained_from) as usize;
-        self.sealed.drain(0..drop_count.min(self.sealed.len()));
+        // The in-memory view follows the on-disk one. **The span index is replaced, not drained**: every
+        // span was a byte offset into the segment that no longer exists, so dropping the compacted prefix
+        // would leave the survivors pointing at the wrong file. `rebuilt` was computed from the frame
+        // lengths as the new segment was written, so it needs no rescan.
+        self.sealed = rebuilt;
+        self.segment_len = written;
+        self.epoch_start = rebuilt_epoch_start;
         self.retained_from = anchor;
         self.snapshot = Some(snapshot.to_path_buf());
         Ok(())
@@ -676,12 +862,22 @@ impl Log {
             self.pending.len(),
             self.dedup.len()
         );
-        for (index, batches) in self.sealed.iter().enumerate() {
-            out.push_str(&format!(
-                "epoch {}\n",
-                self.retained_from + index as Epoch + 1
-            ));
-            for batch in batches {
+        // Reads each epoch back from the segment rather than printing what is held, because after C10
+        // nothing is held. A rendering that quietly omitted the rows would be a rendering that stopped
+        // being usable for the crash harness's comparisons, which is what it is for.
+        for index in 0..self.sealed.len() {
+            let epoch = self.retained_from + index as Epoch + 1;
+            out.push_str(&format!("epoch {epoch}\n"));
+            let batches = match self.epoch(epoch) {
+                Ok(batches) => batches,
+                // A render is a diagnostic, and a diagnostic that panics is worse than one that says it
+                // could not read.
+                Err(error) => {
+                    out.push_str(&format!("  unreadable: {error}\n"));
+                    continue;
+                }
+            };
+            for batch in &batches {
                 for (row, weight) in &batch.entries {
                     out.push_str(&format!(
                         "  {}/{}: {row} => {weight}\n",
