@@ -233,6 +233,10 @@ impl Client {
         self.request("GET", "/explain-state", &[])
     }
 
+    pub fn explain_maintenance(&self) -> std::io::Result<Response> {
+        self.request("GET", "/explain-maintenance", &[])
+    }
+
     pub fn health(&self) -> std::io::Result<Response> {
         self.request("GET", "/health", &[])
     }

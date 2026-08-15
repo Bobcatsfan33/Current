@@ -13,9 +13,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C5** — the SQL frontend and the incrementalizer | **complete; exit gate green in CI** |
 | **C6** — the memo: standing queries and shared circuitry | **complete; exit gate green in CI** |
 | **C7** — one-shot queries, Parquet ground truth, compaction | **complete; exit gate green in CI** |
-| **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18's freeze now FINAL** |
+| **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18 amended additively by D-25** |
 | **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
-| **C10** — performance | **IN PROGRESS — the instruments and residency are done and gated; the hot loops and the four benchmarks are not. See the section below for exactly which** |
+| **C10** — performance | **implementation complete; required CI checks are the exit gate** |
 | C11 … C13 | not started |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
@@ -1743,11 +1743,10 @@ of reach here rather than assumed to be covered.
 
 ---
 
-## C10 — performance (IN PROGRESS)
+## C10 — performance (IMPLEMENTATION COMPLETE; CI-GATED)
 
-**This section describes an unfinished sprint, and says so at the top rather than at the bottom.** Two of
-C10's five parts are done and gated; three are not started. What follows separates them, because a
-performance sprint reported as "mostly done" is a performance sprint whose numbers nobody can locate.
+All C10 implementation and evidence is present. The required repository checks remain the exit gate;
+local success is never substituted for that gate.
 
 ### Done, and gated
 
@@ -1795,30 +1794,31 @@ span index per epoch. `Log::dedup_len` and `Log::index_bytes` exist so a gate ca
 **5(a) · The calibration tooth.** A miscounted workload — the last operation performed but not counted —
 which the counting check catches at the smallest case (asked 1, reported 0). Marker-grepped and reverted.
 
-### Not done, and not begun
+### Completed in the closing pass
 
-Named individually, because "the rest of C10" is not a description anybody can act on:
+**2 · Compacted-server recovery and bounded operations.** `SnapshotChunks` verifies each Parquet file
+incrementally and yields record batches of at most 1,024 rows. `Engine::open` declares the compacted epoch,
+hydrates the snapshot stream, then replays the retained suffix; a restart test compacts a live server and
+proves epoch and answer identity. D-25 adds `visit_prefix`: both state backends stream their ordered range,
+MIN stops after the first entry, MAX retains only the last, SUM/AVG/COUNT retain scalar accumulators, and
+join probes do not allocate an intermediate match vector. Early-stop tests pin both backends.
 
-- **Un-refusing server-side compaction.** The log pages, but `Engine::open` still returns `Unsupported`
-  for a compacted prefix. Doing it needs two things this session did not build: a `Memo` that can be told
-  its epoch after a bootstrap (`Circuit::set_epoch` exists; the memo does not expose it), and a **streaming**
-  snapshot hydration, since hydrating a Parquet snapshot as one delta would reintroduce O(data) residency
-  through the other door.
-- **2 · Bounded single operations.** `scan_prefix` still returns a `Vec`, and an aggregate still folds a
-  changed group's whole multiset. Unstarted.
-- **3 · The hot loops.** No vectorised inner loops, no `consolidate()` as sort+merge, and **no `unsafe`
-  anywhere** — every crate still carries `#![forbid(unsafe_code)]`. D-1's inventory discipline has not been
-  exercised because there is nothing yet to exercise it on.
-- **4 · The benchmarks.** None of the four exist: maintenance cost vs change volume (and `EXPLAIN
-  MAINTENANCE` with it), standing-answer read latency, one-shot vs DuckDB on TPC-H SF0.1, and the swarm.
-  The overlapping-query-set generator that serves both the strengthened I-8 gate and the swarm is not
-  written. **No performance number is claimed anywhere**, which is the honest state of a sprint whose
-  benchmarks do not exist: the instruments are ready and have measured nothing but themselves.
-- **5(b) · The sharing-regression tooth.** It requires the swarm benchmark to exist first, since what it
-  proves is that the swarm can see a cost shift.
+**3 · Hot path.** `ZSetBatch::consolidate` is a stable total-order sort followed by one linear neighbour
+merge, preserving checked-overflow order while removing a B-tree insertion per row. Arrow columns are
+decoded once before the contiguous pass. No `unsafe` was required, so D-1's unsafe inventory remains
+empty rather than being weakened to manufacture a vectorization claim.
 
-### What the next session needs
+**4 · Four calibrated benchmarks and the operator report.** `scripts/run_c10_benchmarks.py` builds the
+release workers, creates TPC-H SF0.1 through DuckDB 1.5.5, alternates paired rounds, and writes
+`testing/evidence/c10-benchmarks.json`. The artifact contains maintenance cost at 100/1,000/10,000 changed
+rows, standing-answer reads, a DuckDB comparison over 600,572 real `lineitem` rows, and marginal
+registration after 10,000 overlapping standing queries. It publishes every sample, median, fastest,
+slowest, machine and caveat. D-26 adds `EXPLAIN MAINTENANCE` and `GET /explain-maintenance`; it reports
+measured counters and links timing to the artifact rather than inventing a nanoseconds-per-step constant.
 
-Start where this one stopped: compaction in the server (the two missing pieces are named above), then item
-2, then item 3, then the benchmarks — and the benchmarks in the user's order, because the swarm is the one
-the README will lead with and therefore the one whose calibration matters most.
+**5(b) · Sharing-regression tooth.** The benchmark and test consume one deterministic 10,000-query
+generator. The gate proves all SQL strings are distinct, shared and private memos answer identically, and
+the shared memo holds less than half the nodes of the private one. A canonicalization regression that
+silently stops sharing therefore moves a correctness-independent assertion.
+
+C11 is the next sprint and is not started in this session, preserving the one-sprint rule.

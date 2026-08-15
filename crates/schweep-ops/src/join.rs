@@ -288,9 +288,23 @@ impl Operator for Join {
             let Some(key) = key_of(left_row, &self.left_key) else {
                 continue;
             };
-            for (index_key, right_weight) in self.right_index.scan_prefix(&key)? {
-                let right_row = row_from_index_key(&index_key, key_len)?;
-                out.push(joined(left_row, *left_weight, &right_row, right_weight)?);
+            let mut failure = None;
+            self.right_index
+                .visit_prefix(&key, &mut |index_key, right_weight| {
+                    let result = row_from_index_key(index_key, key_len).and_then(|right_row| {
+                        joined(left_row, *left_weight, &right_row, right_weight)
+                    });
+                    match result {
+                        Ok(entry) => out.push(entry),
+                        Err(error) => {
+                            failure = Some(error);
+                            return false;
+                        }
+                    }
+                    true
+                })?;
+            if let Some(error) = failure {
+                return Err(error);
             }
         }
 
@@ -299,9 +313,23 @@ impl Operator for Join {
             let Some(key) = key_of(right_row, &self.right_key) else {
                 continue;
             };
-            for (index_key, left_weight) in self.left_index.scan_prefix(&key)? {
-                let left_row = row_from_index_key(&index_key, key_len)?;
-                out.push(joined(&left_row, left_weight, right_row, *right_weight)?);
+            let mut failure = None;
+            self.left_index
+                .visit_prefix(&key, &mut |index_key, left_weight| {
+                    let result = row_from_index_key(index_key, key_len).and_then(|left_row| {
+                        joined(&left_row, left_weight, right_row, *right_weight)
+                    });
+                    match result {
+                        Ok(entry) => out.push(entry),
+                        Err(error) => {
+                            failure = Some(error);
+                            return false;
+                        }
+                    }
+                    true
+                })?;
+            if let Some(error) = failure {
+                return Err(error);
             }
         }
 

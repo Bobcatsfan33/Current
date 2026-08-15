@@ -1,9 +1,9 @@
 //! `RedbBackend`: the durable implementation (D-19, amending D-5; `ARCHITECTURE.md` §5.5).
 //!
-//! **It implements [`StateBackend`] as frozen at C4's exit — not one method added, removed, or
-//! widened.** That was the test D-18's provisional clause set: the freeze becomes final when a second
-//! backend validates the trait, and this is that backend. What the freeze cost, and what it bought, is
-//! recorded in `docs/DECISIONS.md` under D-18 and in the honest notes below.
+//! **It implements the C4 surface plus D-25's additive bounded-scan amendment.** C10 proved that the
+//! original `scan_prefix -> Vec` contract made one operation require O(group) memory even when state
+//! spilled correctly. `visit_prefix` fixes that without changing any existing method's meaning; the
+//! reasoning and the renewed freeze are recorded under D-25.
 //!
 //! ## The shape
 //!
@@ -210,7 +210,11 @@ impl StateBackend for RedbBackend {
         Ok(())
     }
 
-    fn scan_prefix(&self, prefix: &[Value]) -> Result<Vec<(Key, i64)>> {
+    fn visit_prefix(
+        &self,
+        prefix: &[Value],
+        visitor: &mut dyn FnMut(&Key, i64) -> bool,
+    ) -> Result<()> {
         let start = encode_key(prefix);
         let txn = self
             .db
@@ -229,12 +233,14 @@ impl StateBackend for RedbBackend {
         }
         .map_err(|e| StateError::Backend(e.to_string()))?;
 
-        let mut out = Vec::new();
         for entry in range {
             let (key, weight) = entry.map_err(|e| StateError::Backend(e.to_string()))?;
-            out.push((decode_key(key.value())?, weight.value()));
+            let decoded = decode_key(key.value())?;
+            if !visitor(&decoded, weight.value()) {
+                break;
+            }
         }
-        Ok(out)
+        Ok(())
     }
 
     fn get(&self, key: &[Value]) -> Result<Option<i64>> {
@@ -350,6 +356,26 @@ mod tests {
         );
         assert_eq!(backend.scan_prefix(&[Value::Int(9)]).unwrap(), vec![]);
         assert_eq!(backend.len(), 5);
+    }
+
+    #[test]
+    fn a_prefix_visitor_stops_after_one_redb_entry() {
+        let path = scratch("bounded-scan");
+        let mut backend = RedbBackend::open(&path).unwrap();
+        let mut batch = WriteBatch::new();
+        for suffix in 0..1_000 {
+            batch.add(vec![Value::Int(1), Value::Int(suffix)], 1);
+        }
+        backend.write(&batch).unwrap();
+
+        let mut visited = 0;
+        backend
+            .visit_prefix(&[Value::Int(1)], &mut |_key, _weight| {
+                visited += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(visited, 1, "the redb cursor must honour the bound");
     }
 
     /// The count is maintained, not guessed — including through the zero-weight removals.

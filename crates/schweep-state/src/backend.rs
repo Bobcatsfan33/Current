@@ -64,12 +64,32 @@ pub trait StateBackend: fmt::Debug + Send {
     /// not leak one entry per row it has ever seen.
     fn write(&mut self, batch: &WriteBatch) -> Result<()>;
 
-    /// Every `(key, weight)` whose key starts with `prefix`, in key order.
+    /// Visit every `(key, weight)` whose key starts with `prefix`, in key order, without collecting.
     ///
     /// Order is part of the contract, not an accident of the implementation: two backends that
     /// scanned in different orders would make an operator's output depend on which one it was
     /// given, and I-2 forbids that.
-    fn scan_prefix(&self, prefix: &[Value]) -> Result<Vec<(Key, i64)>>;
+    ///
+    /// Returning `false` stops the scan. That makes MIN and MAX O(1) entries after the B-tree seek,
+    /// while a fold such as SUM stays O(group) CPU and O(1) memory (D-25).
+    fn visit_prefix(
+        &self,
+        prefix: &[Value],
+        visitor: &mut dyn FnMut(&Key, i64) -> bool,
+    ) -> Result<()>;
+
+    /// Collect a prefix for compatibility, diagnostics, and tests.
+    ///
+    /// Operators must use [`StateBackend::visit_prefix`]. This helper intentionally retains the C4
+    /// API shape without making its O(prefix-size) allocation part of a query step.
+    fn scan_prefix(&self, prefix: &[Value]) -> Result<Vec<(Key, i64)>> {
+        let mut entries = Vec::new();
+        self.visit_prefix(prefix, &mut |key, weight| {
+            entries.push((key.clone(), weight));
+            true
+        })?;
+        Ok(entries)
+    }
 
     /// The weight at `key`, or `None` if absent.
     fn get(&self, key: &[Value]) -> Result<Option<i64>>;

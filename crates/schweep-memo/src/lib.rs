@@ -46,6 +46,7 @@ pub mod canonical;
 pub mod costs;
 pub mod error;
 pub mod explain;
+pub mod maintenance;
 pub mod registry;
 
 pub use canonical::{canonicalize, subtree_hash};
@@ -54,4 +55,5 @@ pub use explain::{
     explain_circuit, reconcile_circuit, CostModel, ExplainState, OperatorState, QueryState,
     Reconciliation,
 };
+pub use maintenance::{explain_maintenance, ExplainMaintenance, MaintenanceNode, QueryMaintenance};
 pub use registry::{Accounting, Admission, CatchUp, Chunks, Handle, Memo, Registration, Sharing};

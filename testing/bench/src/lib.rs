@@ -31,11 +31,13 @@
 
 pub mod calibrate;
 pub mod report;
+pub mod swarm;
 pub mod timer;
 pub mod units;
 
 pub use calibrate::{counted_work, is_measurable, spin, Band, MIN_WORK_OVER_CLOCK_RESOLUTION};
 pub use report::{Benchmark, Machine};
+pub use swarm::{marginal_query, near_duplicate_queries};
 pub use timer::{
     clock_is_monotonic, clock_resolution_nanos, interleaved, paired, round, sample, Round, Sample,
 };

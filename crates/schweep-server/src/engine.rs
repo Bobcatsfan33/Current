@@ -125,19 +125,6 @@ impl Engine {
         let mut faults = FaultInjector::inert();
         let log = Log::open(dir.join("log"), catalog.clone(), &mut faults, sync)?;
 
-        // Compaction is not wired into `schweepd`, and this refusal is what keeps that honest. Hydration
-        // would still find the data — `one_delta_for` reads the snapshot — but `replay` below derives the
-        // dataflow's epoch by *counting* the retained epochs, so a compacted prefix would leave every
-        // answer reported under an epoch number short by the prefix's length. Wrong epoch numbers on
-        // right answers is precisely the failure I-3 exists to prevent, so this stops instead.
-        if log.retained_from() > 0 {
-            return Err(ServerError::Unsupported(
-                "the log has a compacted prefix; schweepd's recovery derives its epoch by replaying \
-                 retained epochs, so it would report answers under epoch numbers short by the prefix. \
-                 Compaction in the server is C10 work, not a case to paper over here",
-            ));
-        }
-
         // **The state store is deleted before it is opened**, and that is not a shortcut — it is the
         // D-22 addendum, which exists because skipping it applied every input twice. State crosses a
         // restart by *bootstrap*: the retained log plus the C7 snapshot, hydrated per registration. A
@@ -157,11 +144,15 @@ impl Engine {
         let _unused_by_recovery = checkpoint::load(dir.join("ckpt"))?;
 
         // The memo keeps no data: catch-up is sourced from the log and the snapshot below (C8's gap).
-        let memo = Memo::without_input_cache(
+        let mut memo = Memo::without_input_cache(
             catalog.clone(),
             Sharing::On,
             Box::new(RedbFactory::new(&state)),
         )?;
+        // A compacted prefix is represented by the published snapshot, not by replayable epochs. Set
+        // the clock to that anchor before replaying the suffix; otherwise the data would recover but
+        // every answer would be labelled with an epoch short by `retained_from` (I-3).
+        memo.set_epoch(log.retained_from())?;
 
         let registry = Registry::load(&dir)?;
         let mut engine = Engine {
@@ -247,10 +238,21 @@ impl Engine {
         let mut failure: Option<ServerError> = None;
         let log = &self.log;
         let memo = &mut self.memo;
-        let chunks =
-            ((log.retained_from() + 1)..=log.sealed_epoch()).map_while(|epoch| match epoch_deltas(
-                log, epoch,
-            ) {
+        // Snapshot first, one Parquet record batch at a time; then the retained log suffix, one epoch
+        // at a time. Both halves are bounded by their largest chunk, never by database size.
+        let snapshot = match log.snapshot() {
+            Some(path) => Some(schweep_batch::snapshot::chunks(path, &self.catalog)?),
+            None => None,
+        };
+        let snapshot_chunks = snapshot
+            .into_iter()
+            .flatten()
+            .map(|chunk| chunk.map_err(ServerError::from));
+        let suffix_chunks =
+            ((log.retained_from() + 1)..=log.sealed_epoch()).map(|epoch| epoch_deltas(log, epoch));
+        let chunks = snapshot_chunks
+            .chain(suffix_chunks)
+            .map_while(|chunk| match chunk {
                 Ok(deltas) => Some(deltas),
                 Err(error) => {
                     failure = Some(error);
@@ -574,6 +576,11 @@ impl Engine {
             .render())
     }
 
+    #[must_use]
+    pub fn explain_maintenance(&self) -> String {
+        self.memo.explain_maintenance().render()
+    }
+
     /// Checkpoint the dataflow (C1–C7 of the checkpoint sequence).
     ///
     /// **Recovery does not read this**, and the D-22 addendum says why: a memo cannot be restored through
@@ -589,6 +596,26 @@ impl Engine {
             self.sync,
         )?;
         Ok(())
+    }
+
+    /// Compact the sealed prefix into the Parquet ground-truth snapshot and keep serving.
+    ///
+    /// The checkpoint is published first because it is the recovery anchor (P1). The snapshot and
+    /// suffix then replace the prefix through C7's publish-then-swap protocol. Recovery exercises the
+    /// streaming path above, so compaction is not considered successful merely because the current
+    /// in-memory memo kept answering.
+    pub fn compact(&mut self) -> ServerResult<schweep_batch::Compacted> {
+        self.checkpoint()?;
+        let anchor = self.log.sealed_epoch();
+        let integrals = schweep_batch::hydrate::accumulated_upto(&self.log, &self.catalog, anchor)?;
+        let mut faults = FaultInjector::inert();
+        Ok(schweep_batch::compact(
+            &mut self.log,
+            anchor,
+            &integrals,
+            &mut faults,
+            self.sync,
+        )?)
     }
 
     /// Graceful shutdown: **checkpoint, then drain** (§6 C9).
@@ -707,6 +734,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use schweep_zset::{DataType, Field, Schema, Value};
 
     #[test]
     fn a_delta_names_what_arrived_and_what_left() {
@@ -728,5 +756,56 @@ mod tests {
             delta_between("(n: Int64)\n", "(n: Int64)\n"),
             "(no change)\n"
         );
+    }
+
+    #[test]
+    fn a_compacted_server_restarts_at_the_right_epoch_with_the_same_answer() {
+        let dir = std::env::temp_dir().join(format!(
+            "schweep-c10-server-compaction-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let schema = Schema::new_table(vec![
+            Field::not_null("k", DataType::Int64),
+            Field::not_null("n", DataType::Int64),
+        ])
+        .unwrap();
+        let catalog = Catalog::from([("t".to_owned(), schema)]);
+        let mut engine = Engine::open(
+            &dir,
+            catalog.clone(),
+            Policy::default(),
+            SyncPolicy::Deferred,
+            2,
+        )
+        .unwrap();
+        let handle = engine
+            .register(
+                "SELECT t.k AS k, SUM(t.n) AS s FROM t GROUP BY t.k",
+                Admission::with_unbounded_state("test fixture has a bounded key set"),
+            )
+            .unwrap();
+        for (token, value) in [("b1", 10), ("b2", 5), ("b3", -2)] {
+            engine
+                .ingest(
+                    "source",
+                    "t",
+                    token,
+                    vec![(Row::new(vec![Value::Int(1), Value::Int(value)]), 1)],
+                )
+                .unwrap();
+            engine.seal().unwrap();
+        }
+        let before = engine.read(handle).unwrap();
+        let compacted = engine.compact().unwrap();
+        assert_eq!(compacted.anchor, 3);
+        assert_eq!(engine.read(handle).unwrap(), before);
+        drop(engine);
+
+        let recovered =
+            Engine::open(&dir, catalog, Policy::default(), SyncPolicy::Deferred, 2).unwrap();
+        assert_eq!(recovered.read(handle).unwrap(), before);
+        assert_eq!(recovered.epoch(), 3);
+        assert!(recovered.health().contains("retained_from 3"));
     }
 }
