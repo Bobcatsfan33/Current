@@ -19,7 +19,7 @@ dataset) and then torn down — same machinery, one code path.
 Schweep is the compute plane of a future database called MutinyDB, but it is a **standalone
 engine**: it has no dependency on any sibling system, and none may be added.
 
-## Status: Sprint C10 implementation complete; CI-gated (with the gaps named below)
+## Status: Sprint C11 implementation complete; CI-gated (with the gaps named below)
 
 Schweep is near the beginning. Sprints are numbered C0–C13 and a sprint is complete only when its
 exit gate is green in CI. There are no dates.
@@ -79,8 +79,16 @@ process, and resumes from its token with no epoch delivered twice and none lost.
 stream a compacted Parquet snapshot plus its retained suffix; prefix probes and aggregate folds have
 bounded intermediate memory; and `consolidate()` is a stable sort plus a linear merge rather than one
 B-tree insertion per row. `EXPLAIN MAINTENANCE` exposes measured work counters through the embedded API
-and `GET /explain-maintenance`. Arrow Flight remains deferred to C13, and C11–C13 have not started.
+and `GET /explain-maintenance`.
 `schweep-oracle` remains deliberately slow because its job is to be obviously correct, not quick.
+
+**C11 source-scoped retraction is implemented.** Every batch's `source_id` survives compaction in an
+authenticated snapshot-v2 `PROVENANCE` ledger. `POST /retract-source` resolves that source's current net
+contribution, optionally applies ordinary SQL `WHERE` semantics to one table, and feeds the negative
+delta through the same epoch path as any other change. The generated transaction remains attributed to
+the source, so a completed retry is a no-op. The C11 differential gate exercises 128 seeded histories,
+four query families, shared memo registrations, compaction, and restart against an oracle rebuilt
+without the source. C12 and C13 have not started; Arrow Flight remains deferred to C13.
 
 **Numbers we publish:** each traces to a committed artifact in
 `testing/evidence/` — `c8-state-costs.json` and `c9-bounds.json` (deterministic, both recomputed by a
@@ -146,8 +154,9 @@ one dedup token per acknowledged append and a 16-byte span per epoch; both legit
 Retained subscription deltas are not durable—a subscriber that falls behind across a restart must re-read
 the durable answer. State can spill beyond memory, but the frozen snapshot method still returns a byte
 vector, so checkpointing that state materializes it (D-18). Compaction is callable and recoverable but has
-no automatic policy. A snapshot holds rows rather than source provenance, which C11's source-scoped
-retraction needs.
+no automatic policy. Snapshot v2 carries authenticated source provenance; a legacy v1 snapshot remains
+readable but source retraction fails closed if its discarded prefix would be needed, because ownership
+cannot be reconstructed honestly.
 
 A memo is not checkpointable because its shape is its live query set. `schweepd` rebuilds each
 registration by streaming the snapshot and retained suffix (D-22), so registration remains O(data) per
