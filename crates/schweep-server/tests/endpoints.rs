@@ -655,3 +655,33 @@ fn two_servers_fed_the_same_requests_are_byte_identical() {
         two.client.plan(0).unwrap().body().unwrap()
     );
 }
+
+#[test]
+fn explain_maintenance_reports_shared_work_without_double_counting_the_dataflow() {
+    let h = Harness::fresh("explain-maintenance");
+    h.client
+        .register("SELECT t.n AS n FROM t WHERE t.k > 1")
+        .unwrap();
+    h.client
+        .register("SELECT DISTINCT t.n AS n FROM t WHERE t.k > 1")
+        .unwrap();
+    h.client
+        .ingest("source", "t", "batch", &[(row(2, 10), 1)])
+        .unwrap();
+    h.client.seal().unwrap();
+
+    let report = h
+        .client
+        .explain_maintenance()
+        .unwrap()
+        .body()
+        .unwrap()
+        .to_owned();
+    assert!(report.starts_with("EXPLAIN MAINTENANCE\nepoch 1\n"));
+    assert!(report.contains("query 0"));
+    assert!(report.contains("query 1"));
+    assert!(report.contains("shared with 1 other quer(y|ies)"));
+    assert!(report.contains("dataflow:"));
+    assert!(report.contains("counted once each"));
+    assert!(report.contains("testing/evidence/c10-benchmarks.json"));
+}

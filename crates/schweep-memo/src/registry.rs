@@ -305,6 +305,16 @@ impl Memo {
         self.dataflow.epoch()
     }
 
+    /// Declare the epoch represented by a bootstrapped snapshot before replaying its suffix.
+    ///
+    /// This is deliberately the same narrow operation as [`Circuit::set_epoch`]. It does not apply
+    /// data and it cannot move backwards; C10 exposes it here because the server owns the snapshot
+    /// while the memo owns the circuit clock. Without this seam a compacted server can recover the
+    /// right answer under the wrong epoch number, violating I-3.
+    pub fn set_epoch(&mut self, epoch: Epoch) -> Result<()> {
+        Ok(self.dataflow.set_epoch(epoch)?)
+    }
+
     #[must_use]
     pub fn dataflow(&self) -> &Circuit {
         &self.dataflow

@@ -713,6 +713,43 @@ description of what exists.
 
 ---
 
+### D-25 · Prefix scans gain a bounded visitor; the C4 freeze is amended additively
+
+*Sprint: C10. Recorded before changing `StateBackend`, because D-18 called the C4 surface frozen.*
+
+**The problem.** `StateBackend::scan_prefix` returns a `Vec`. That made a single join probe allocate
+every match and made an aggregate materialize a changed group's entire ordered multiset before reducing
+it. State could spill beyond RAM while one operation still had to fit in RAM, contradicting C8's product
+claim and C10's explicit bounded-operation gate.
+
+**The decision.** Add an object-safe `visit_prefix` operation that yields ordered entries to a visitor
+and stops if the visitor asks it to stop. Backend failures still return through the method. Both backends implement it without collecting;
+operators use it exclusively. `scan_prefix` remains as a default collecting compatibility helper for
+tests, fingerprints, and downstream code written against the C4 API. This is the narrowest amendment:
+no existing method changes meaning, ordering remains S-7, and no format changes.
+
+**Why the freeze moves.** Keeping a known O(group-size) allocation solely to preserve a pre-release
+internal trait would turn "frozen" into "cannot repair a proven availability defect." Removing or
+changing `scan_prefix` would impose needless churn; adding the primitive the existing contract could not
+express preserves compatibility while making the production path bounded. The trait freezes again with
+this method included.
+
+### D-26 · `EXPLAIN MAINTENANCE` reports measured work, never a timing estimate
+
+*Sprint: C10. Recorded before adding the operator-facing report and server endpoint.*
+
+**The decision.** `EXPLAIN MAINTENANCE` reports cumulative operator steps and emitted entries for
+each registered query, identifies shared nodes, and reports the dataflow-wide distinct totals. These
+are runtime counters and therefore facts. It does not convert them to nanoseconds: timing is
+machine-dependent and belongs in the calibrated C10 artifact, whose path the report names.
+
+The HTTP spelling is `GET /explain-maintenance`, beside `EXPLAIN STATE`. Sharing means per-query totals
+overlap, so the report presents both the query view and a dataflow total that counts each node once.
+That distinction is part of the contract; summing the query rows would turn sharing into fictitious
+work.
+
+---
+
 ## Open questions
 
 ### Q-1 · Non-integer arithmetic: fixed-point decimals

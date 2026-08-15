@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 schweep-zset.workspace = true
+schweep-plan.workspace = true
+schweep-memo.workspace = true
+schweep-batch.workspace = true
+schweep-sql.workspace = true
 
 [lints]
 workspace = true

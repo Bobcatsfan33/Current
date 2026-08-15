@@ -555,6 +555,10 @@ dependencies = [
 name = "schweep-bench"
 version = "0.0.0"
 dependencies = [
+ "schweep-batch",
+ "schweep-memo",
+ "schweep-plan",
+ "schweep-sql",
  "schweep-zset",
 ]
 

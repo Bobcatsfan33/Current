@@ -52,16 +52,22 @@ impl StateBackend for MemBackend {
         Ok(())
     }
 
-    fn scan_prefix(&self, prefix: &[Value]) -> Result<Vec<(Key, i64)>> {
-        // A plain filtered walk. It is O(n) per probe, which is the wrong complexity for a join
-        // and is knowingly left that way: C2 is the correctness sprint, and `range` over an
-        // ordered map is the fix C10 will make when there is a benchmark to justify it (I-10).
-        Ok(self
-            .entries
-            .iter()
-            .filter(|(key, _)| key.len() >= prefix.len() && key.starts_with(prefix))
-            .map(|(key, weight)| (key.clone(), *weight))
-            .collect())
+    fn visit_prefix(
+        &self,
+        prefix: &[Value],
+        visitor: &mut dyn FnMut(&Key, i64) -> bool,
+    ) -> Result<()> {
+        // A prefix is one contiguous B-tree range. Starting at the prefix avoids C2's full-map filter;
+        // the first non-matching key ends the range, and no intermediate `Vec` is allocated (D-25).
+        for (key, weight) in self.entries.range(prefix.to_vec()..) {
+            if key.len() < prefix.len() || !key.starts_with(prefix) {
+                break;
+            }
+            if !visitor(key, *weight) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn get(&self, key: &[Value]) -> Result<Option<i64>> {
@@ -164,6 +170,25 @@ mod tests {
         batch.add(key(&[2]), 1);
         backend.write(&batch).unwrap();
         assert_eq!(backend.scan_prefix(&[]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_prefix_visitor_stops_without_reading_the_rest() {
+        let mut backend = MemBackend::new();
+        let mut batch = WriteBatch::new();
+        for suffix in 0..1_000 {
+            batch.add(key(&[1, suffix]), 1);
+        }
+        backend.write(&batch).unwrap();
+
+        let mut visited = 0;
+        backend
+            .visit_prefix(&[Value::Int(1)], &mut |_key, _weight| {
+                visited += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(visited, 1, "the visitor's stop signal is an actual bound");
     }
 
     #[test]

@@ -18,13 +18,11 @@
 //!
 //! ## Performance, honestly
 //!
-//! Every operation here materialises rows out of the columnar batch, works on them, and builds
-//! a new batch. That is O(n log n) with a per-row allocation, and it is slow. It is the C0
-//! implementation and it is written to be obviously correct; the columnar sort+merge rewrite of
-//! `consolidate` is scheduled for C10, where it is named as the hottest path in the engine. No
-//! performance claim is made for this code and no benchmark artifact exists for it (I-10).
+//! `consolidate` is C10's sort+merge implementation: columns are decoded once, rows are sorted in a
+//! contiguous vector, and equal neighbours are merged in one linear pass. It still materialises a
+//! row representation at the Arrow boundary; eliminating that last representation requires a measured
+//! Arrow-native ordering that preserves S-7 exactly, not an unbenchmarked claim (I-10).
 
-use std::collections::btree_map::{BTreeMap, Entry};
 use std::fmt;
 use std::sync::Arc;
 
@@ -226,8 +224,9 @@ impl ZSetBatch {
     /// This is where "an insert and a delete cancel" physically happens. The output is in
     /// canonical form, so `consolidate` is idempotent — a property test pins that.
     ///
-    /// Ordering comes from `BTreeMap`, not a hash map: iteration order must be a function of the
-    /// data alone (I-2).
+    /// Ordering comes from a stable total-order sort, never a hash map: iteration order must be a
+    /// function of the data alone (I-2). Stability also preserves the input order of equal rows, so
+    /// checked-overflow behaviour is unchanged from applying their weights in arrival order.
     pub fn consolidate(&self) -> Result<ZSetBatch> {
         let merged = self.consolidated_entries()?;
         ZSetBatch::from_entries(self.schema.clone(), merged)
@@ -244,30 +243,35 @@ impl ZSetBatch {
     }
 
     fn consolidated_entries(&self) -> Result<Vec<(Row, i64)>> {
-        let mut merged: BTreeMap<Row, i64> = BTreeMap::new();
-        for (row, weight) in self.entries()? {
-            match merged.entry(row) {
-                Entry::Vacant(slot) => {
-                    if weight != 0 {
-                        slot.insert(weight);
-                    }
+        let mut entries = self.entries()?;
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut merged: Vec<(Row, i64)> = Vec::with_capacity(entries.len());
+        for (row, weight) in entries {
+            if weight == 0 {
+                continue;
+            }
+            let same_as_previous = merged.last().is_some_and(|(previous, _)| previous == &row);
+            if same_as_previous {
+                let remove = if let Some((_, previous_weight)) = merged.last_mut() {
+                    *previous_weight =
+                        previous_weight
+                            .checked_add(weight)
+                            .ok_or(ZSetError::WeightOverflow {
+                                while_doing: "consolidating weights for equal rows",
+                            })?;
+                    *previous_weight == 0
+                } else {
+                    false
+                };
+                if remove {
+                    merged.pop();
                 }
-                Entry::Occupied(mut slot) => {
-                    let sum = slot
-                        .get()
-                        .checked_add(weight)
-                        .ok_or(ZSetError::WeightOverflow {
-                            while_doing: "consolidating weights for equal rows",
-                        })?;
-                    if sum == 0 {
-                        slot.remove();
-                    } else {
-                        slot.insert(sum);
-                    }
-                }
+            } else {
+                merged.push((row, weight));
             }
         }
-        Ok(merged.into_iter().collect())
+        Ok(merged)
     }
 }
 

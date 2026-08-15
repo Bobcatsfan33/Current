@@ -36,14 +36,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType as ArrowType, Field as ArrowField, Schema as ArrowSchema};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
-use schweep_zset::{Schema, ZSetBatch};
+use schweep_zset::{EpochDeltas, Schema, ZSetBatch};
 
 use crate::error::{BatchError, Result};
 
@@ -181,27 +182,196 @@ pub fn read_table(path: &Path, schema: &Schema) -> Result<ZSetBatch> {
     let mut entries: Vec<(schweep_zset::Row, i64)> = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|e| BatchError::Arrow(e.to_string()))?;
-        let weight_index =
-            batch
-                .schema()
-                .index_of(WEIGHT_COLUMN)
-                .map_err(|_| BatchError::CorruptSnapshot {
-                    what: "a snapshot file has no __weight column",
-                })?;
-        let weights = batch
-            .column(weight_index)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or(BatchError::CorruptSnapshot {
-                what: "__weight is not an Int64 column",
-            })?;
-        let data = batch
-            .project(&(0..weight_index).collect::<Vec<_>>())
-            .map_err(|e| BatchError::Arrow(e.to_string()))?;
-        let rows = ZSetBatch::from_arrow(schema.clone(), data, weights.clone())?;
+        let rows = decode_batch(batch, schema)?;
         entries.extend(rows.entries()?);
     }
     Ok(ZSetBatch::from_entries(schema.clone(), entries)?)
+}
+
+fn decode_batch(batch: RecordBatch, schema: &Schema) -> Result<ZSetBatch> {
+    let weight_index =
+        batch
+            .schema()
+            .index_of(WEIGHT_COLUMN)
+            .map_err(|_| BatchError::CorruptSnapshot {
+                what: "a snapshot file has no __weight column",
+            })?;
+    let weights = batch
+        .column(weight_index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or(BatchError::CorruptSnapshot {
+            what: "__weight is not an Int64 column",
+        })?;
+    let data = batch
+        .project(&(0..weight_index).collect::<Vec<_>>())
+        .map_err(|e| BatchError::Arrow(e.to_string()))?;
+    Ok(ZSetBatch::from_arrow(
+        schema.clone(),
+        data,
+        weights.clone(),
+    )?)
+}
+
+#[derive(Debug)]
+struct TableDescriptor {
+    table: String,
+    path: PathBuf,
+    schema: Schema,
+    expected_rows: usize,
+}
+
+struct CurrentTable {
+    descriptor: TableDescriptor,
+    reader: ParquetRecordBatchReader,
+    rows: usize,
+}
+
+/// Snapshot contents as bounded Arrow record-batch deltas.
+///
+/// Only one Parquet reader and one record batch are resident. This is the bootstrap half of C10's
+/// server-compaction fix: a 500 GiB snapshot must not require a 500 GiB `EpochDeltas` allocation just
+/// because a standing query is being rebuilt.
+pub struct SnapshotChunks {
+    pending: std::vec::IntoIter<TableDescriptor>,
+    current: Option<CurrentTable>,
+    failed: bool,
+}
+
+impl std::fmt::Debug for SnapshotChunks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotChunks")
+            .field("tables_pending", &self.pending.len())
+            .field("table_open", &self.current.is_some())
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
+impl Iterator for SnapshotChunks {
+    type Item = Result<EpochDeltas>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        loop {
+            if let Some(current) = self.current.as_mut() {
+                match current.reader.next() {
+                    Some(Ok(batch)) => {
+                        let rows = match decode_batch(batch, &current.descriptor.schema) {
+                            Ok(rows) => rows,
+                            Err(error) => {
+                                self.failed = true;
+                                return Some(Err(error));
+                            }
+                        };
+                        current.rows += rows.len();
+                        if current.rows > current.descriptor.expected_rows {
+                            self.failed = true;
+                            return Some(Err(BatchError::CorruptSnapshot {
+                                what: "a snapshot file holds more rows than its manifest claims",
+                            }));
+                        }
+                        let entries = match rows.entries() {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                self.failed = true;
+                                return Some(Err(error.into()));
+                            }
+                        };
+                        let mut deltas = EpochDeltas::new();
+                        deltas.extend(current.descriptor.table.clone(), entries);
+                        return Some(Ok(deltas));
+                    }
+                    Some(Err(error)) => {
+                        self.failed = true;
+                        return Some(Err(BatchError::Arrow(error.to_string())));
+                    }
+                    None => {
+                        if current.rows != current.descriptor.expected_rows {
+                            self.failed = true;
+                            return Some(Err(BatchError::CorruptSnapshot {
+                                what: "a snapshot file holds a different number of rows than its manifest claims",
+                            }));
+                        }
+                        self.current = None;
+                    }
+                }
+            } else {
+                let descriptor = self.pending.next()?;
+                let file = match fs::File::open(&descriptor.path) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.failed = true;
+                        return Some(Err(error.into()));
+                    }
+                };
+                let reader = match ParquetRecordBatchReaderBuilder::try_new(file)
+                    .and_then(|builder| builder.with_batch_size(1_024).build())
+                {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        self.failed = true;
+                        return Some(Err(BatchError::Parquet(error.to_string())));
+                    }
+                };
+                self.current = Some(CurrentTable {
+                    descriptor,
+                    reader,
+                    rows: 0,
+                });
+            }
+        }
+    }
+}
+
+fn file_crc32(path: &Path) -> Result<u32> {
+    let mut file = fs::File::open(path)?;
+    let mut checksum = schweep_log::record::Crc32::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let bytes = buffer.get(..read).ok_or(BatchError::CorruptSnapshot {
+            what: "a checksum read exceeded its fixed buffer",
+        })?;
+        checksum.update(bytes);
+    }
+    Ok(checksum.finish())
+}
+
+/// Verify a snapshot, then stream it one bounded Parquet record batch at a time.
+pub fn chunks(dir: &Path, catalog: &BTreeMap<String, Schema>) -> Result<SnapshotChunks> {
+    let manifest = Manifest::decode(&fs::read(dir.join(MANIFEST))?)?;
+    let mut pending = Vec::with_capacity(manifest.tables.len());
+    for (table, (rows, crc)) in manifest.tables {
+        let schema = catalog
+            .get(&table)
+            .cloned()
+            .ok_or_else(|| BatchError::UnknownTable {
+                table: table.clone(),
+            })?;
+        let path = table_path(dir, &table);
+        if file_crc32(&path)? != crc {
+            return Err(BatchError::CorruptSnapshot {
+                what: "a snapshot file failed its manifest checksum",
+            });
+        }
+        pending.push(TableDescriptor {
+            table,
+            path,
+            schema,
+            expected_rows: rows,
+        });
+    }
+    Ok(SnapshotChunks {
+        pending: pending.into_iter(),
+        current: None,
+        failed: false,
+    })
 }
 
 /// The path of one table's file inside a snapshot directory.
@@ -298,6 +468,41 @@ mod tests {
             "the integral must come back byte for byte, negative weights and nulls included"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_snapshot_streams_in_bounded_record_batches_and_preserves_every_row() {
+        let dir = std::env::temp_dir().join(format!("schweep-snap-stream-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = table_path(&dir, "t");
+        let entries: Vec<_> = (0..2_050)
+            .map(|id| (row(id, Some("streamed"), Some(true)), 1))
+            .collect();
+        let integral = ZSetBatch::from_entries(schema(), entries).unwrap();
+        let rows = write_table(&path, &integral).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let manifest = Manifest {
+            epoch: 7,
+            tables: BTreeMap::from([("t".to_owned(), (rows, schweep_log::record::crc32(&bytes)))]),
+            dedup_crc: 0,
+        };
+        fs::write(dir.join(MANIFEST), manifest.encode()).unwrap();
+
+        let catalog = BTreeMap::from([("t".to_owned(), schema())]);
+        let streamed: Vec<_> = chunks(&dir, &catalog)
+            .unwrap()
+            .map(|chunk| chunk.unwrap())
+            .collect();
+        assert!(
+            streamed.len() >= 3,
+            "2,050 rows at a 1,024-row bound must not be returned as one allocation"
+        );
+        let seen: usize = streamed
+            .iter()
+            .map(|chunk| chunk.tables().values().map(Vec::len).sum::<usize>())
+            .sum();
+        assert_eq!(seen, 2_050);
     }
 
     /// Zero-weight rows are not present, so they are not written (S-4, S-5).

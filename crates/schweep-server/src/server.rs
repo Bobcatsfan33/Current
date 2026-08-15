@@ -227,6 +227,7 @@ impl Server {
             ("GET", "/counters") => Ok(self.engine.counters()),
             ("GET", "/fingerprint") => self.engine.fingerprint(),
             ("GET", "/explain-state") => self.engine.explain_state(),
+            ("GET", "/explain-maintenance") => Ok(self.engine.explain_maintenance()),
             ("GET", "/health") => Ok(self.engine.health()),
             _ => Err(ServerError::UnknownPath {
                 method: request.method.clone(),

@@ -248,18 +248,50 @@ pub fn read_framed(bytes: &[u8], at: usize) -> Result<Option<(Record, usize)>> {
     Ok(Some((record, at + 8 + len)))
 }
 
-/// CRC-32 (IEEE), computed directly so the log has no dependency for eight lines of table-free code.
+/// Incremental CRC-32 (IEEE).
+///
+/// The stateful form lets callers verify files with a bounded buffer. Reading a snapshot into one
+/// `Vec` merely to checksum it makes integrity verification the largest allocation in bootstrap,
+/// which defeats C10's streaming hydration even though the Parquet reader itself is bounded.
+#[derive(Clone, Copy, Debug)]
+pub struct Crc32(u32);
+
+impl Crc32 {
+    #[must_use]
+    pub const fn new() -> Crc32 {
+        Crc32(0xFFFF_FFFF)
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut crc = self.0;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = if crc & 1 != 0 { 0xEDB8_8320 } else { 0 };
+                crc = (crc >> 1) ^ mask;
+            }
+        }
+        self.0 = crc;
+    }
+
+    #[must_use]
+    pub const fn finish(self) -> u32 {
+        !self.0
+    }
+}
+
+impl Default for Crc32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// CRC-32 (IEEE), computed directly so the log has no dependency for a table-free implementation.
 #[must_use]
 pub fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = if crc & 1 != 0 { 0xEDB8_8320 } else { 0 };
-            crc = (crc >> 1) ^ mask;
-        }
-    }
-    !crc
+    let mut crc = Crc32::new();
+    crc.update(bytes);
+    crc.finish()
 }
 
 #[cfg(test)]
@@ -372,5 +404,15 @@ mod tests {
         // The standard check value for CRC-32/IEEE over "123456789".
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
         assert_eq!(crc32(b""), 0);
+    }
+
+    #[test]
+    fn incremental_crc_is_independent_of_chunk_boundaries() {
+        let bytes = b"a snapshot checksum must not require the snapshot in memory";
+        let mut incremental = Crc32::new();
+        for chunk in bytes.chunks(3) {
+            incremental.update(chunk);
+        }
+        assert_eq!(incremental.finish(), crc32(bytes));
     }
 }

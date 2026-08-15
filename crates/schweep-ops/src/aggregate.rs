@@ -130,21 +130,6 @@ impl Aggregate {
         key
     }
 
-    /// The ordered multiset of slot `slot`'s argument values for one group.
-    ///
-    /// Ordered by value, because the value is the last component of the key and the backend scans in
-    /// key order (S-7). That ordering is the whole reason MIN/MAX work under retraction.
-    fn multiset(&self, slot: usize, group: &[Value]) -> Result<Vec<(Value, i64)>> {
-        let prefix = self.values_prefix(slot, group);
-        let skip = prefix.len();
-        let mut out = Vec::new();
-        for (key, weight) in self.state.scan_prefix(&prefix)? {
-            let value = key.get(skip).ok_or(OpError::CorruptAggregateState)?.clone();
-            out.push((value, weight));
-        }
-        Ok(out)
-    }
-
     #[must_use]
     fn is_grand_total(&self) -> bool {
         self.keys.is_empty()
@@ -194,84 +179,98 @@ impl Aggregate {
     /// Compute one aggregate from its group's ordered multiset (S-30, S-31).
     fn fold(&self, slot: usize, group: &[Value], func: &AggFunc) -> Result<Value> {
         let name = func.name();
-        let multiset = self.multiset(slot, group)?;
+        if matches!(func, AggFunc::CountStar) {
+            return Ok(Value::Int(
+                self.state.get(&self.total_key(group))?.unwrap_or(0),
+            ));
+        }
+
+        // Stream the ordered multiset. A group can be arbitrarily large, so query execution may
+        // retain accumulators and the current key, never a `Vec` of the group (D-25).
+        let prefix = self.values_prefix(slot, group);
+        let value_at = prefix.len();
+        let mut failure = None;
+        let mut any = false;
+        let mut count = 0_i64;
+        let mut sum = 0_i128;
+        let mut extremum = None;
+        self.state.visit_prefix(&prefix, &mut |key, weight| {
+            let Some(value) = key.get(value_at) else {
+                failure = Some(OpError::CorruptAggregateState);
+                return false;
+            };
+            any = true;
+
+            match func {
+                AggFunc::Count(_) => match count.checked_add(weight) {
+                    Some(next) => count = next,
+                    None => {
+                        failure = Some(OpError::Plan(PlanError::AggregateOverflow { func: name }));
+                        return false;
+                    }
+                },
+                AggFunc::Sum(_) | AggFunc::Avg(_) => {
+                    let Value::Int(x) = value else {
+                        failure = Some(OpError::Plan(PlanError::AggregateTypeUnsupported {
+                            func: name,
+                            ty: value.data_type().unwrap_or(schweep_zset::DataType::Int64),
+                        }));
+                        return false;
+                    };
+                    let Some(term) = i128::from(weight).checked_mul(i128::from(*x)) else {
+                        failure = Some(OpError::Plan(PlanError::AggregateOverflow { func: name }));
+                        return false;
+                    };
+                    let Some(next_sum) = sum.checked_add(term) else {
+                        failure = Some(OpError::Plan(PlanError::AggregateOverflow { func: name }));
+                        return false;
+                    };
+                    let Some(next_count) = count.checked_add(weight) else {
+                        failure = Some(OpError::Plan(PlanError::AggregateOverflow { func: name }));
+                        return false;
+                    };
+                    sum = next_sum;
+                    count = next_count;
+                }
+                AggFunc::Min(_) => {
+                    extremum = Some(value.clone());
+                    return false;
+                }
+                AggFunc::Max(_) => extremum = Some(value.clone()),
+                AggFunc::CountStar => return false,
+            }
+            true
+        })?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
 
         match func {
-            // Unreachable: handled by the caller from the group total.
+            AggFunc::Count(_) => Ok(Value::Int(count)),
+            AggFunc::Sum(_) => {
+                if !any {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Int(i64::try_from(sum).map_err(|_| {
+                        OpError::Plan(PlanError::AggregateOverflow { func: name })
+                    })?))
+                }
+            }
+            AggFunc::Avg(_) => {
+                if !any {
+                    Ok(Value::Null)
+                } else {
+                    let exact_sum = i64::try_from(sum)
+                        .map_err(|_| OpError::Plan(PlanError::AggregateOverflow { func: name }))?;
+                    Ok(Value::Float(exact_sum as f64 / count as f64))
+                }
+            }
+            AggFunc::Min(_) | AggFunc::Max(_) => Ok(extremum.unwrap_or(Value::Null)),
             AggFunc::CountStar => Ok(Value::Int(
                 self.state.get(&self.total_key(group))?.unwrap_or(0),
             )),
-
-            // COUNT(x) counts entries whose value is not null, and returns 0 — never null — when
-            // there are none (S-30). Nulls never enter the multiset, so this is its total weight.
-            AggFunc::Count(_) => {
-                let mut total: i64 = 0;
-                for (_, weight) in &multiset {
-                    total = total
-                        .checked_add(*weight)
-                        .ok_or(OpError::Plan(PlanError::AggregateOverflow { func: name }))?;
-                }
-                Ok(Value::Int(total))
-            }
-
-            AggFunc::Sum(_) => match sum_and_count(&multiset, name)? {
-                None => Ok(Value::Null),
-                Some((sum, _)) => Ok(Value::Int(sum)),
-            },
-
-            // One IEEE-754 division of two exact integers, at emit time, never accumulated
-            // (S-31, D-10). This is why AVG may be a Float64 when a float SUM may not exist.
-            AggFunc::Avg(_) => match sum_and_count(&multiset, name)? {
-                None => Ok(Value::Null),
-                Some((sum, count)) => Ok(Value::Float(sum as f64 / count as f64)),
-            },
-
-            // The first and last entries of an ordered multiset. Retracting the current MIN leaves
-            // the next value in place, and it becomes the first entry — §5.3's requirement, met by
-            // the layout rather than by extra code.
-            AggFunc::Min(_) => Ok(multiset
-                .first()
-                .map_or(Value::Null, |(value, _)| value.clone())),
-            AggFunc::Max(_) => Ok(multiset
-                .last()
-                .map_or(Value::Null, |(value, _)| value.clone())),
         }
     }
-}
-
-/// The exact weighted sum and count of a multiset, or `None` when it is empty (S-30).
-///
-/// `i128` accumulator, `i64` result: a sum that transits outside the `Int64` range and lands back
-/// inside it is correct, which is exactly what an incremental sum under retraction needs (D-11).
-fn sum_and_count(multiset: &[(Value, i64)], func: &'static str) -> Result<Option<(i64, i64)>> {
-    let overflow = || OpError::Plan(PlanError::AggregateOverflow { func });
-    let mut sum: i128 = 0;
-    let mut count: i64 = 0;
-    let mut any = false;
-
-    for (value, weight) in multiset {
-        let x = match value {
-            Value::Int(x) => *x,
-            // Binding proves SUM/AVG arguments are Int64 (S-30); reported rather than assumed.
-            other => {
-                return Err(OpError::Plan(PlanError::AggregateTypeUnsupported {
-                    func,
-                    ty: other.data_type().unwrap_or(schweep_zset::DataType::Int64),
-                }))
-            }
-        };
-        any = true;
-        let term = i128::from(*weight)
-            .checked_mul(i128::from(x))
-            .ok_or_else(overflow)?;
-        sum = sum.checked_add(term).ok_or_else(overflow)?;
-        count = count.checked_add(*weight).ok_or_else(overflow)?;
-    }
-
-    if !any {
-        return Ok(None);
-    }
-    Ok(Some((i64::try_from(sum).map_err(|_| overflow())?, count)))
 }
 
 impl Operator for Aggregate {

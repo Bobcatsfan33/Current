@@ -1081,6 +1081,16 @@ impl Circuit {
         &self.steps
     }
 
+    /// A live node's stable operator label, for operator-facing accounting reports.
+    #[must_use]
+    pub fn node_label(&self, node: NodeId) -> Option<&'static str> {
+        match self.nodes.get(node.index())? {
+            Some(Node::Source { .. }) => Some("source"),
+            Some(Node::Operator { op, .. }) => Some(op.name()),
+            None => None,
+        }
+    }
+
     /// Total operator steps executed — **the I-8 counter**.
     ///
     /// Sharing means a common prefix is stepped once per epoch rather than once per query, so this
