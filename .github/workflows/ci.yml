@@ -80,6 +80,8 @@ jobs:
         run: cargo test -p schweep-server --locked --test subscriber_crash -- --nocapture
       - name: The C11 source-retraction gate (lineage, compaction, shared plans, oracle)
         run: cargo test -p schweep-differential --locked --test c11_source_retraction -- --nocapture
+      - name: The C12 accelerator evidence gate (raw samples, verdict, production boundary)
+        run: cargo test -p schweep-bench --locked --test c12_evidence -- --nocapture
 
   no-network:
     name: no-network

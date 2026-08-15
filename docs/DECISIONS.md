@@ -779,6 +779,54 @@ from an uncompacted log before enabling C11 on such data; never guess ownership 
 from the source, target epoch, table, and canonical retraction contents. If a crash interrupts appends,
 retry drops acknowledged batches and completes the same epoch through I-4's ordinary recovery path.
 
+### D-28 · The accelerator verdict is pre-registered and evidence-bound
+
+*Sprint: C12. Criteria recorded before the spike implementation or measurements exist.*
+
+**Question being decided.** Does one fused GPU filter-plus-aggregate kernel justify a later, separately
+designed accelerator phase for the one-shot cold path? C12 does not add a GPU production path, dependency,
+feature flag, or public API. It produces a disposable spike, a reproducible evidence artifact, and either
+`GO` or `NO-GO`. CPU remains the only shipped execution path regardless of the verdict.
+
+**Workload and measurement contract.** The candidate computes the same `Int64` filter-plus-sum over the
+same deterministic Arrow value buffers as the current C10 CPU one-shot implementation, at exactly
+100,000, 1,000,000, and 10,000,000 rows. Eleven paired, alternating release rounds follow one untimed
+warm-up. GPU samples include input-buffer creation/copy, command encoding, submission, completion, and
+the final reduction of bounded partials. Reusable device, compiled-pipeline, and command-queue creation is
+reported separately and excluded from each sample, just as process/toolchain startup is excluded from the
+C10 paired benchmark. Every result must equal the CPU result exactly.
+
+**Pre-registered `GO` rule.** All of the following must hold; one miss is `NO-GO`:
+
+1. exact result equality in the warm-up and all 66 measured executions (two implementations × three
+   sizes × eleven rounds);
+2. GPU/CPU median speedup of at least `2.00x` at both 1,000,000 and 10,000,000 rows;
+3. break-even no later than 1,000,000 rows (GPU median no slower than CPU median there);
+4. no failed or discarded measured round, and the artifact publishes every raw paired sample, full range,
+   machine, OS, compiler, device, workload definition, and inclusion/exclusion boundary;
+5. the spike builds and runs from the committed script using only the checked-in source, the pinned Rust
+   dependency graph, and the host platform SDK. An unavailable device or toolchain is evidence for
+   `NO-GO`, not permission to substitute a simulation.
+
+A `GO` authorizes design work only. Production acceptance would still require a portable capability
+boundary, CPU parity for every supported semantic case, memory-admission controls, fault fallback,
+differential tests, and independent Linux/NVIDIA or other target evidence. A `NO-GO` keeps D-8's CPU-first
+decision in force and removes the spike from the release build surface.
+
+**Verdict: `GO` for a later design phase; CPU remains the only production path.** The committed Apple M2
+run satisfied all pre-registered criteria. Median GPU speedup was 56.76x at 100,000 rows, 89.85x at
+1,000,000 rows, and 85.98x at 10,000,000 rows; break-even was therefore at or below the smallest measured
+size. Three warm-up pairs and all 66 measured candidate executions agreed exactly. The GPU samples include
+the buffer copy, allocation, command work, synchronization, and final host reduction. They exclude the
+reported 74.90 ms one-time runtime shader/pipeline setup. `testing/evidence/c12-accelerator.json` contains
+every raw sample and `c12_evidence` recomputes its medians and verdict threshold.
+
+The magnitude is evidence of opportunity, not a production performance claim: the CPU side is Schweep's
+general incremental circuit used as a one-shot, while the spike is specialized to one fused integer
+filter/sum. The experiment therefore identifies the cold-path specialization opportunity it was designed
+to find. It does not establish the production requirements listed above, and no Metal source is linked by
+or distributed in a production binary.
+
 ---
 
 ## Open questions
