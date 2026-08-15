@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "audited_at": "2026-08-15",
+  "cutoff_run_id": 31903930881,
   "repository": "Bobcatsfan33/schweep",
   "workflow": "CI",
   "requested_window": 50,
@@ -10,7 +11,7 @@
     "failure": 4,
     "unresolved_flakes": 0
   },
-  "scope_note": "All CI workflow runs available in GitHub were audited. The repository has 36, so no claim is made about 14 runs that do not exist.",
+  "scope_note": "All CI workflow runs through the last pre-C13 main run, 31903930881, were audited. The repository had 36 at that cutoff, so no claim is made about 14 runs that did not exist. C13 implementation/proof runs are classified in their pull request and do not retroactively change this historical snapshot.",
   "failures": [
     {
       "run_id": 31900755090,

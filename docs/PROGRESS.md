@@ -1912,7 +1912,7 @@ records the patch compatibility boundary. Package version is `0.1.0`.
 | 10x crash | parameterized C4 gate; scheduled `c13-extended` job | 100,000 cycles configured; 1,000-cycle coverage smoke passed locally across all 26 seams; hosted extended result pending |
 | I-1…I-10 named | CI `invariants` matrix; `testing/evidence/c13-invariants.json` | ten distinct check names and targeted commands |
 | Tuned-constant ledger | I-10 `evidence` gate | every behavioral constant names an allowlisted committed receipt and matches code |
-| Last 50 CI runs | `testing/evidence/c13-ci-audit.json` | only 36 runs exist: 32 green, four failures, zero unresolved; every failure has a cause, fix, and later green proof |
+| Last 50 pre-C13 CI runs | `testing/evidence/c13-ci-audit.json` | only 36 runs existed through main run `31903930881`: 32 green, four failures, zero unresolved; every failure has a cause, fix, and later green proof |
 | Local zero-flake repeat | C8 smoke; same audit artifact | replaced a machine-dependent 10% RSS fraction after it failed a bounded 39.7 MiB run; three corrected 1.08 GiB repeats green at 0.0050, 0.0074, and 0.0000 RSS/state byte-growth coefficient |
 | Issue-sourced limitations | README and open issues #4…#17 | no undocumented release-candidate limitation found in the C13 pass |
 | Release integrity | `.github/workflows/release.yml`; `scripts/verify_c13_release.py` | tag/version/streak fail closed; locked test/build; metadata, toolchain, commit, tarball checksum published |

@@ -101,8 +101,8 @@ wider SQL semantics or another GPU platform. CPU remains the only shipped path.
 **C13 has frozen the release-candidate surface, not released it.** The supported API and patch-level
 compatibility promise are in [`docs/current-api.md`](docs/current-api.md). Ten separately named CI jobs
 map I-1 through I-10 to executable gates; scheduled jobs add a 44,000-seed differential sweep and a
-100,000-cycle crash sweep. The complete GitHub CI history—36 runs, not an invented 50—was audited, and
-all four historical failures map to fixes and later green proof in
+100,000-cycle crash sweep. The complete pre-C13 GitHub CI history—36 runs through main run
+`31903930881`, not an invented 50—was audited, and all four historical failures map to fixes and later green proof in
 [`testing/evidence/c13-ci-audit.json`](testing/evidence/c13-ci-audit.json). Arrow Flight remains out of
 v0.1 by D-29 because the repository has no workload evidence that transport is the current bottleneck.
 The `current-v0.1` release workflow fails closed until seven different scheduled nights have both the

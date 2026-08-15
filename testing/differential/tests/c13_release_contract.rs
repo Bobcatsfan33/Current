@@ -83,6 +83,10 @@ fn a_premature_release_is_mechanically_blocked() {
     let output = Command::new("python3")
         .arg(root.join("scripts/verify_c13_release.py"))
         .arg("current-v0.1")
+        // GitHub sets this to the PR branch. The release workflow intentionally trusts that live tag
+        // value, but this test is exercising the explicit candidate argument and must not inherit an
+        // unrelated runner ref that changes which fail-closed check fires first.
+        .env_remove("GITHUB_REF_NAME")
         .current_dir(root)
         .output()
         .expect("run release verifier");
