@@ -813,6 +813,20 @@ boundary, CPU parity for every supported semantic case, memory-admission control
 differential tests, and independent Linux/NVIDIA or other target evidence. A `NO-GO` keeps D-8's CPU-first
 decision in force and removes the spike from the release build surface.
 
+**Verdict: `GO` for a later design phase; CPU remains the only production path.** The committed Apple M2
+run satisfied all pre-registered criteria. Median GPU speedup was 56.76x at 100,000 rows, 89.85x at
+1,000,000 rows, and 85.98x at 10,000,000 rows; break-even was therefore at or below the smallest measured
+size. Three warm-up pairs and all 66 measured candidate executions agreed exactly. The GPU samples include
+the buffer copy, allocation, command work, synchronization, and final host reduction. They exclude the
+reported 74.90 ms one-time runtime shader/pipeline setup. `testing/evidence/c12-accelerator.json` contains
+every raw sample and `c12_evidence` recomputes its medians and verdict threshold.
+
+The magnitude is evidence of opportunity, not a production performance claim: the CPU side is Schweep's
+general incremental circuit used as a one-shot, while the spike is specialized to one fused integer
+filter/sum. The experiment therefore identifies the cold-path specialization opportunity it was designed
+to find. It does not establish the production requirements listed above, and no Metal source is linked by
+or distributed in a production binary.
+
 ---
 
 ## Open questions

@@ -34,3 +34,14 @@ reproducibility on a real supported GPU. Anything else is `NO-GO`.
 
 Neither verdict changes the production engine in C12. The evidence file will record the verdict and each
 criterion independently so a prose conclusion cannot disagree with the measurements.
+
+## Result
+
+`GO` for a later accelerator design phase; no production GPU code ships. On the recorded Apple M2, the
+median speedups were 56.76x / 89.85x / 85.98x at 100,000 / 1,000,000 / 10,000,000 rows. Break-even was at
+or below 100,000 rows, and the three warm-up pairs plus all 66 measured executions agreed exactly.
+
+The receipt is `testing/evidence/c12-accelerator.json`. The CI test `c12_evidence` recomputes each median
+from the eleven raw samples, recomputes the speedup, and applies the thresholds above. These results are
+specific to one fused integer filter/sum on Metal versus the existing general C10 one-shot circuit. They
+are not evidence for a production implementation, wider SQL semantics, or another GPU platform.

@@ -82,19 +82,28 @@ B-tree insertion per row. `EXPLAIN MAINTENANCE` exposes measured work counters t
 and `GET /explain-maintenance`.
 `schweep-oracle` remains deliberately slow because its job is to be obviously correct, not quick.
 
-**C11 source-scoped retraction is implemented.** Every batch's `source_id` survives compaction in an
+**C11 source-scoped retraction is complete.** Every batch's `source_id` survives compaction in an
 authenticated snapshot-v2 `PROVENANCE` ledger. `POST /retract-source` resolves that source's current net
 contribution, optionally applies ordinary SQL `WHERE` semantics to one table, and feeds the negative
 delta through the same epoch path as any other change. The generated transaction remains attributed to
 the source, so a completed retry is a no-op. The C11 differential gate exercises 128 seeded histories,
 four query families, shared memo registrations, compaction, and restart against an oracle rebuilt
-without the source. C12 and C13 have not started; Arrow Flight remains deferred to C13.
+without the source.
+
+**C12's bounded accelerator spike returned `GO` for later design work, not for production code.** The
+criteria were committed before the implementation. On the recorded Apple M2, one fused Metal integer
+filter/sum was 89.85x faster at 1 million rows and 85.98x faster at 10 million rows by paired median,
+including buffer copies, command setup, synchronization, and final reduction. Three warm-ups and all 66
+measured executions matched the current C10 CPU one-shot result exactly. The magnitude identifies the
+cost of the general one-shot circuit and an opportunity for a specialized cold path; it does not prove
+wider SQL semantics or another GPU platform. CPU remains the only shipped path. C13 has not started;
+Arrow Flight remains deferred to C13.
 
 **Numbers we publish:** each traces to a committed artifact in
 `testing/evidence/` — `c8-state-costs.json` and `c9-bounds.json` (deterministic, both recomputed by a
 test), `c8-cache-sweep.json`, `c9-memo-ceiling.json` and `c9-soak.json` (machine-dependent, and labelled as
-such), and `c10-benchmarks.json`. On the recorded 8-core Apple-arm64 host, using the **slowest** of 11
-release rounds: a 10,000-row maintenance batch cost **3.176 µs per changed row**, a compact 128-row answer
+such), `c10-benchmarks.json`, and `c12-accelerator.json`. On the recorded 8-core Apple-arm64 host, using
+the **slowest** of 11 release rounds: a 10,000-row maintenance batch cost **3.176 µs per changed row**, a compact 128-row answer
 over 100,000 retained input rows cost **18.068 µs per standing read**, and the 10,001st member of a
 10,000-query shared swarm cost **1.786 ms for the marginal query**. In the paired TPC-H SF0.1 projection,
 Schweep one-shot was **89.46× slower than DuckDB** at each engine's slowest round. That comparison uses

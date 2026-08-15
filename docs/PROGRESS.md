@@ -16,8 +16,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18 amended additively by D-25** |
 | **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
 | **C10** — performance | complete; repository CI green |
-| **C11** — source-scoped retraction | **implementation complete; required CI checks are the exit gate** |
-| C12 … C13 | not started |
+| **C11** — source-scoped retraction | **complete; exit gate green in CI** |
+| **C12** — accelerator spike | **implementation complete; required CI checks are the exit gate** |
+| C13 | not started |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
 > while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
@@ -1826,7 +1827,7 @@ C11 follows below.
 
 ---
 
-## C11 — source-scoped retraction and the lineage hook (IMPLEMENTATION COMPLETE; CI-GATED)
+## C11 — source-scoped retraction and the lineage hook (COMPLETE; EXIT GATE GREEN IN CI)
 
 C11 makes `source_id` operational rather than decorative. A source's current net contribution is
 reconstructed from an authenticated snapshot-v2 `PROVENANCE` ledger plus the retained log, optionally
@@ -1860,3 +1861,31 @@ manifest checksum and prevents use.
   where Loom envelopes supply the evidence graph around this primitive.
 - C11 does not decide the accelerator. C12 is the bounded go/no-go spike; C13 owns the public API freeze,
   extended soak, Flight decision, and v0.1 release.
+
+---
+
+## C12 — the accelerator spike (IMPLEMENTATION COMPLETE; CI-GATED)
+
+D-28 and `docs/C12_ACCELERATOR_PROTOCOL.md` froze the experiment and verdict before the spike source was
+written. The committed runner compares the current C10 one-shot circuit with one runtime-compiled Metal
+filter/sum kernel over the same deterministic Int64-pair input, at 100,000, 1,000,000, and 10,000,000
+rows. Each size has an untimed warm-up and eleven alternating paired release rounds.
+
+### The exit gate
+
+| Gate | Evidence | Result |
+| --- | --- | --- |
+| Exact results | `testing/evidence/c12-accelerator.json`; `c12_evidence` | three warm-up pairs and 66 measured candidate executions agreed exactly |
+| At least 2.00x at 1M and 10M | same artifact/test | 89.85x and 85.98x median speedup |
+| Break-even no later than 1M | same artifact/test | GPU was faster at the smallest measured size, 100,000 rows |
+| Complete, reproducible receipt | `scripts/run_c12_accelerator.py`; artifact/test | eleven raw CPU and GPU samples per size; machine, toolchains, inclusion boundary, setup cost, and source commit recorded |
+| Production boundary unchanged | workspace build plus source inventory | Metal is a separately compiled evidence worker; no production crate, feature, dependency, or API links it |
+
+### Verdict and boundary
+
+`GO` authorizes a later design phase only. CPU remains the only product execution path. The large speedup
+is an honest comparison between Schweep's general incremental circuit used for one-shot work and a
+single specialized fused kernel; it shows a cold-path specialization opportunity and does not prove SQL
+coverage, fallback, admission, fault handling, NVIDIA/Linux portability, or production correctness.
+
+C13 owns the API/limitations freeze, extended gates, zero-flake audit, Flight decision, and v0.1 tag.
