@@ -15,8 +15,9 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C7** — one-shot queries, Parquet ground truth, compaction | **complete; exit gate green in CI** |
 | **C8** — state spill and cold-start honesty | **complete; exit gate green in CI; D-18 amended additively by D-25** |
 | **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
-| **C10** — performance | **implementation complete; required CI checks are the exit gate** |
-| C11 … C13 | not started |
+| **C10** — performance | complete; repository CI green |
+| **C11** — source-scoped retraction | **implementation complete; required CI checks are the exit gate** |
+| C12 … C13 | not started |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
 > while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
@@ -1821,4 +1822,41 @@ generator. The gate proves all SQL strings are distinct, shared and private memo
 the shared memo holds less than half the nodes of the private one. A canonicalization regression that
 silently stops sharing therefore moves a correctness-independent assertion.
 
-C11 is the next sprint and is not started in this session, preserving the one-sprint rule.
+C11 follows below.
+
+---
+
+## C11 — source-scoped retraction and the lineage hook (IMPLEMENTATION COMPLETE; CI-GATED)
+
+C11 makes `source_id` operational rather than decorative. A source's current net contribution is
+reconstructed from an authenticated snapshot-v2 `PROVENANCE` ledger plus the retained log, optionally
+filtered by the same bound scalar expression used for SQL `WHERE`, negated, and appended through the
+ordinary ingest/seal path under the same source identity. No operator, memo, result store, subscription,
+or recovery path has a special deletion mode.
+
+### The exit gate
+
+| Gate | Evidence | Result |
+| --- | --- | --- |
+| Retract-source equals replay with that source absent | `c11_source_retraction::retract_source_matches_world_without_source_over_seeded_join_and_aggregate_suite` | 128 deterministic source histories; filter/project, join, aggregate, and join→aggregate answers compared to the naïve oracle |
+| The seam crosses shared circuitry | same gate | four simultaneous standing registrations in one sharing-enabled memo; every registration remains live after retraction and restart |
+| Compaction preserves ownership | every eighth seeded case plus `source_provenance_round_trips_and_is_manifest_authenticated` | provenance is consolidated at the anchor, whole-file checksummed in MANIFEST, reloaded, retracted, and recovered |
+| Predicate semantics do not drift | `predicate_retraction_matches_where_and_does_not_advance_on_retry`; network endpoint test | the existing SQL binder and evaluator decide the predicate; only TRUE matches |
+| Retry is idempotent | both predicate tests | the generated negative transaction retains the source id; a repeat sees net zero and creates no epoch |
+| Public contract works over the socket | `source_retraction_is_predicate_scoped_and_idempotent_over_the_wire` | scoped recall, receipt, answer update, retry, and full-source recall |
+
+### Format and failure rules
+
+D-27 records the snapshot-v2 format and the same-source negative transaction. Snapshot v1 remains valid
+for reads. If it represents a discarded prefix, source reconstruction returns
+`ProvenanceUnavailable` instead of attributing rows heuristically. A damaged `PROVENANCE` ledger fails its
+manifest checksum and prevents use.
+
+### What C11 does not prove
+
+- The generated retraction must currently fit the existing per-source pending admission bounds. Large
+  recalls need resumable chunk planning and progress receipts in the composed MutinyDB fleet plane.
+- The lineage key is source-level. Column/cell derivation graphs and an audit narrative are MutinyDB M4,
+  where Loom envelopes supply the evidence graph around this primitive.
+- C11 does not decide the accelerator. C12 is the bounded go/no-go spike; C13 owns the public API freeze,
+  extended soak, Flight decision, and v0.1 release.

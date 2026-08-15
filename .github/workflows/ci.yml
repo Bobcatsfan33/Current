@@ -78,6 +78,8 @@ jobs:
         run: cargo test -p schweep-server --locked --test kill9 -- --nocapture --test-threads=1
       - name: The C9 subscriber-crash gate (kill the subscriber, resume by token)
         run: cargo test -p schweep-server --locked --test subscriber_crash -- --nocapture
+      - name: The C11 source-retraction gate (lineage, compaction, shared plans, oracle)
+        run: cargo test -p schweep-differential --locked --test c11_source_retraction -- --nocapture
 
   no-network:
     name: no-network

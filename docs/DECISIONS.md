@@ -748,6 +748,37 @@ overlap, so the report presents both the query view and a dataflow total that co
 That distinction is part of the contract; summing the query rows would turn sharing into fictitious
 work.
 
+### D-27 · Source retraction is a durable, same-source negative transaction
+
+*Sprint: C11. Recorded before the source index, snapshot format, or endpoint was changed.*
+
+**The decision.** Every acknowledged input batch already carries `source_id`. Compaction now writes a
+checksummed `PROVENANCE` ledger beside the Parquet table integrals and dedup ledger. The ledger holds the
+consolidated net contribution for each `(source_id, table)` at the snapshot epoch; retained log batches
+extend it. A source retraction negates the selected part of that net contribution and appends those
+negative batches through the normal ingest/seal path **under the same `source_id`**.
+
+That last clause is the idempotency rule. Once the retraction seals, the source's selected net
+contribution is zero, so repeating the request generates no delta and no new epoch. It also means a
+partial retraction composes: retracting predicate A and later predicate B removes exactly what remains in
+each set, including their overlap only once. The operation is not a privileged mutation of operator
+state, a log rewrite, or a snapshot edit; all standing queries, joins, aggregates, shared nodes,
+subscriptions, checkpoints, and recovery observe an ordinary epoch.
+
+**Predicate contract.** No predicate means all tables and rows. A predicate is scoped to one table and
+is parsed and bound by the existing SQL scalar-expression implementation; only rows for which it
+evaluates `TRUE` are retracted. `FALSE` and `NULL` do not match, exactly as `WHERE` (S-17). There is no
+second expression evaluator for recalls to drift from SQL.
+
+**Format compatibility.** New snapshots are `current snapshot v2` and authenticate `PROVENANCE` in the
+manifest. A v1 snapshot remains readable for query recovery, but source retraction is refused after a v1
+prefix has been discarded because the missing attribution cannot be reconstructed honestly. Recompact
+from an uncompacted log before enabling C11 on such data; never guess ownership from surviving rows.
+
+**Atomicity and retry.** The generated batches share one epoch. Existing exactly-once tokens are derived
+from the source, target epoch, table, and canonical retraction contents. If a crash interrupts appends,
+retry drops acknowledged batches and completes the same epoch through I-4's ordinary recovery path.
+
 ---
 
 ## Open questions
