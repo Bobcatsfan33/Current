@@ -827,6 +827,60 @@ filter/sum. The experiment therefore identifies the cold-path specialization opp
 to find. It does not establish the production requirements listed above, and no Metal source is linked by
 or distributed in a production binary.
 
+### D-29 · HTTP is the frozen v0.1 transport; Flight remains an evaluated extension
+
+*Sprint: C13. Supersedes D-23's deadline to decide Flight in C13; preserves D-6, I-6, and I-10.*
+
+**Decision.** v0.1 freezes the tested HTTP contract in `docs/current-api.md`; it does not add Arrow
+Flight. Flight remains tracked in [issue #13](https://github.com/Bobcatsfan33/schweep/issues/13), behind
+three acceptance requirements: a workload that benefits from columnar transport, proof that its door
+compiles to the identical plan and execution counters, and a dependency/runtime security review.
+
+The reason is not that Flight has no value. It can remove row/frame translation at a future columnar
+boundary and supplies a standard ecosystem protocol. The reason is that C13 found no committed workload
+showing transport to be the current bottleneck, while adding `tonic`, `prost`, an async runtime, HTTP/2,
+and generated protocol code would create a second server lifecycle and a materially larger dependency
+surface immediately before an API freeze. The existing HTTP door already runs the full differential
+harness over a real socket, has a client implementation, and survives the kill/subscriber matrices.
+
+Adding an unproven transport to satisfy an architecture noun would weaken the hardening sprint. The
+architecture's `Arrow Flight + HTTP` line is therefore a direction, not a v0.1 claim. HTTP framing may be
+replaced or supplemented in v0.2, but the operations, error taxonomy, epoch tokens, and one-execution-door
+proof remain the compatibility boundary.
+
+### D-30 · v0.1 freezes a named supported surface, not every public Rust item
+
+*Sprint: C13. Preserves I-1 through I-10 and turns the API freeze into a reviewable contract.*
+
+`docs/current-api.md` is the complete compatibility promise. The supported deployment is the `schweepd`
+binary; the supported embedded surface is the explicitly named engine, client, plan, one-shot, and Z-set
+entry points. Other `pub` items exist so workspace crates and evidence tests can compose, but the crates
+remain `publish = false` and those internals are not silently frozen.
+
+Patch releases in the `0.1.x` line are backward-compatible at the named HTTP, semantic, subscription,
+wire, and durable-format boundaries. Breaking them requires v0.2 and migration notes. Snapshot v1 and v2
+remain readable; new compactions write v2. This is narrow enough to keep and explicit enough for an
+operator to test before upgrading.
+
+The architecture's historical release tag `current-v0.1` remains the tag of record and points to package
+version `0.1.0`. It is intentionally not created by this decision: D-31 makes the evidence gate, not a
+human's desire to finish, authorize that tag.
+
+### D-31 · the release tag fails closed on seven qualifying calendar nights
+
+*Sprint: C13. Preserves I-10 and the C13 exit gate.*
+
+A qualifying night is one scheduled CI workflow where both `nightly crash gate (SyncPolicy::Full)` and
+`nightly soak (schweepd under load)` succeed. A green workflow that did not contain both jobs does not
+qualify. `testing/evidence/c13-nightly-streak.json` records each run and its individual job conclusions;
+`scripts/verify_c13_release.py` rejects the tag unless seven qualifying dates exist and the artifact is
+explicitly complete. The release workflow runs that verifier before tests, build, packaging, checksum,
+provenance capture, or publication.
+
+As of 2026-08-15, GitHub contains five successful scheduled workflow days but only four have both required
+nightly jobs. The release is therefore blocked. This is an expected passage-of-time gate, not permission
+to synthesize three runs or count a manually dispatched rerun as another night.
+
 ---
 
 ## Open questions

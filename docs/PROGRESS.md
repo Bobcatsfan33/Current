@@ -17,8 +17,8 @@ that proves it is a violation of I-10, so every row below points at something ru
 | **C9** — `schweepd`: the server | **complete; exit gate green in CI; the real `kill -9` now exists** |
 | **C10** — performance | complete; repository CI green |
 | **C11** — source-scoped retraction | **complete; exit gate green in CI** |
-| **C12** — accelerator spike | **implementation complete; required CI checks are the exit gate** |
-| C13 | not started |
+| **C12** — accelerator spike | **complete; exit gate green in CI** |
+| **C13** — hardening and v0.1 freeze | **implementation in progress; release blocked at 4/7 qualifying nights** |
 
 > **Correction, made in the rename session (2026-08-11).** This table read `C5 … C13 | not started`
 > while C5, C6, C7 and C8 were each complete with a green gate and a full section below. Four sprints'
@@ -1889,3 +1889,41 @@ single specialized fused kernel; it shows a cold-path specialization opportunity
 coverage, fallback, admission, fault handling, NVIDIA/Linux portability, or production correctness.
 
 C13 owns the API/limitations freeze, extended gates, zero-flake audit, Flight decision, and v0.1 tag.
+
+---
+
+## C13 — hardening and v0.1 freeze (IMPLEMENTATION COMPLETE; PASSAGE-OF-TIME GATE PENDING)
+
+C13 freezes the supported surface in `docs/current-api.md`, maps every invariant I-1 through I-10 to a
+separately named CI matrix job, and schedules the order-of-magnitude populations: 44,000 differential
+seeds and 100,000 crash/recover cycles. The ordinary crash gate reads `SCHWEEP_CRASH_CYCLES` but retains
+10,000 as its default, so the larger job exercises the identical harness rather than a fork.
+
+The README limitation list is sourced from open issues #4 through #17. D-29 closes the Flight decision:
+HTTP is the v0.1 transport because it has the socket differential and crash proof, while Flight has no
+committed bottleneck evidence and would add a second server runtime immediately before the freeze. D-30
+records the patch compatibility boundary. Package version is `0.1.0`.
+
+### Hardening evidence
+
+| Gate | Evidence | Result |
+| --- | --- | --- |
+| 10x differential | `c13_extended`; scheduled `c13-extended` job | 44,000 seeds, 204,321 epochs, 248,321 comparisons, 2,101 matching error answers locally; hosted result pending the merged workflow |
+| 10x crash | parameterized C4 gate; scheduled `c13-extended` job | 100,000 cycles configured; 1,000-cycle coverage smoke passed locally across all 26 seams; hosted extended result pending |
+| I-1…I-10 named | CI `invariants` matrix; `testing/evidence/c13-invariants.json` | ten distinct check names and targeted commands |
+| Tuned-constant ledger | I-10 `evidence` gate | every behavioral constant names an allowlisted committed receipt and matches code |
+| Last 50 pre-C13 CI runs | `testing/evidence/c13-ci-audit.json` | only 36 runs existed through main run `31903930881`: 32 green, four failures, zero unresolved; every failure has a cause, fix, and later green proof |
+| Local zero-flake repeat | C8 smoke; same audit artifact | replaced a machine-dependent 10% RSS fraction after it failed a bounded 39.7 MiB run; three corrected 1.08 GiB repeats green at 0.0050, 0.0074, and 0.0000 RSS/state byte-growth coefficient |
+| Issue-sourced limitations | README and open issues #4…#17 | no undocumented release-candidate limitation found in the C13 pass |
+| Release integrity | `.github/workflows/release.yml`; `scripts/verify_c13_release.py` | tag/version/streak fail closed; locked test/build; metadata, toolchain, commit, tarball checksum published |
+
+### The remaining exit gate
+
+The architecture requires a full week of green nightly soaks. A qualifying night has both the full-sync
+crash job and the server soak green in one scheduled workflow. As of 2026-08-15, five scheduled workflow
+days are green but only four contain both jobs; the August 11 run predates `nightly-soak`. The exact runs
+are in `testing/evidence/c13-nightly-streak.json`.
+
+Therefore `current-v0.1` is not tagged. The release workflow mechanically rejects it until seven unique
+qualifying dates are recorded and the artifact is marked complete. Manually dispatching the workflow can
+prove the extended jobs, but cannot manufacture another calendar night.
