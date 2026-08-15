@@ -10,6 +10,7 @@ const RELEASE: &str = include_str!("../../../.github/workflows/release.yml");
 const INVARIANTS: &str = include_str!("../../evidence/c13-invariants.json");
 const NIGHTLY: &str = include_str!("../../evidence/c13-nightly-streak.json");
 const AUDIT: &str = include_str!("../../evidence/c13-ci-audit.json");
+const EXTENDED: &str = include_str!("../../evidence/c13-extended-hosted.json");
 const README: &str = include_str!("../../../README.md");
 
 #[test]
@@ -67,6 +68,17 @@ fn the_honesty_pass_is_issue_sourced_and_audited() {
     assert!(AUDIT.contains("\"available_runs\": 36"));
     assert!(AUDIT.contains("\"unresolved_flakes\": 0"));
     assert_eq!(AUDIT.matches("\"green_proof\"").count(), 4);
+}
+
+#[test]
+fn the_hosted_extended_populations_are_retained_without_nightly_credit() {
+    assert!(EXTENDED.contains("\"workflow_run_id\": 31906947809"));
+    assert!(EXTENDED.contains("\"head_sha\": \"5de862dd71d26c23cf45f37af463efd25a10635f\""));
+    assert!(EXTENDED.contains("\"comparisons\": 248321"));
+    assert!(EXTENDED.contains("\"divergences\": 0"));
+    assert!(EXTENDED.contains("\"cycles\": 100000"));
+    assert!(EXTENDED.contains("\"named_seams_fired\": 26"));
+    assert!(EXTENDED.contains("\"nightly_streak_credit\": false"));
 }
 
 #[test]

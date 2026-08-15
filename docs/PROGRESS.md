@@ -1908,8 +1908,8 @@ records the patch compatibility boundary. Package version is `0.1.0`.
 
 | Gate | Evidence | Result |
 | --- | --- | --- |
-| 10x differential | `c13_extended`; scheduled `c13-extended` job | 44,000 seeds, 204,321 epochs, 248,321 comparisons, 2,101 matching error answers locally; hosted result pending the merged workflow |
-| 10x crash | parameterized C4 gate; scheduled `c13-extended` job | 100,000 cycles configured; 1,000-cycle coverage smoke passed locally across all 26 seams; hosted extended result pending |
+| 10x differential | `c13_extended`; `testing/evidence/c13-extended-hosted.json` | hosted run `31906947809` at merged commit `5de862d`: 44,000 seeds, 204,321 epochs, 248,321 comparisons, 2,101 matching error answers, **zero divergences** |
+| 10x crash | parameterized C4 gate; `testing/evidence/c13-extended-hosted.json` | same hosted run: 100,000 cycles and seeds, 47,109 seam faults, 18,711 byte-boundary faults, all 26 named seams fired, green |
 | I-1…I-10 named | CI `invariants` matrix; `testing/evidence/c13-invariants.json` | ten distinct check names and targeted commands |
 | Tuned-constant ledger | I-10 `evidence` gate | every behavioral constant names an allowlisted committed receipt and matches code |
 | Last 50 pre-C13 CI runs | `testing/evidence/c13-ci-audit.json` | only 36 runs existed through main run `31903930881`: 32 green, four failures, zero unresolved; every failure has a cause, fix, and later green proof |
