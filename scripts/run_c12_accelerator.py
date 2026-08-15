@@ -115,12 +115,14 @@ def main() -> int:
             metal_device = gpu_ready[2]
 
             measurements = []
+            exact_warmup_pairs = 0
             exact_executions = 0
             for rows in SIZES:
                 _, cpu_warm = run_once(cpu, rows, "CPU")
                 _, gpu_warm = run_once(gpu, rows, "GPU")
                 if cpu_warm != gpu_warm:
                     raise RuntimeError(f"warm-up mismatch at {rows}: CPU={cpu_warm}, GPU={gpu_warm}")
+                exact_warmup_pairs += 1
 
                 cpu_samples: list[int] = []
                 gpu_samples: list[int] = []
@@ -154,7 +156,10 @@ def main() -> int:
             )
             by_size = {item["rows"]: item for item in measurements}
             criteria = {
-                "exact_all_executions": exact_executions == len(SIZES) * ROUNDS * 2,
+                "exact_all_warmups_and_measured_executions": (
+                    exact_warmup_pairs == len(SIZES)
+                    and exact_executions == len(SIZES) * ROUNDS * 2
+                ),
                 "gpu_speedup_at_least_2x_at_1m": by_size[1_000_000]["median_gpu_speedup"] >= 2.0,
                 "gpu_speedup_at_least_2x_at_10m": by_size[10_000_000]["median_gpu_speedup"] >= 2.0,
                 "break_even_no_later_than_1m": break_even is not None and break_even <= 1_000_000,
@@ -170,6 +175,8 @@ def main() -> int:
                 "suite": "schweep-c12-accelerator-spike",
                 "verdict": verdict,
                 "criteria": criteria,
+                "exact_warmup_pairs": exact_warmup_pairs,
+                "exact_measured_executions": exact_executions,
                 "break_even_rows": break_even,
                 "rounds": ROUNDS,
                 "paired_order": "CPU then GPU on even rounds; GPU then CPU on odd rounds, after one untimed warm-up",
